@@ -157,9 +157,10 @@ def compare_excel_changes(file_path, silent=False, event_number=None, is_polling
     try:
         from core.excel_parser import dump_excel_cells_with_timeout
         
-        base_name = os.path.basename(file_path)
+        from utils.helpers import _baseline_key_for_path
+        base_key = _baseline_key_for_path(file_path)
         
-        old_baseline = load_baseline(base_name)
+        old_baseline = load_baseline(base_key)
         if old_baseline is None:
             old_baseline = {}
 
@@ -169,14 +170,14 @@ def compare_excel_changes(file_path, silent=False, event_number=None, is_polling
             current_data = dump_excel_cells_with_timeout(file_path, show_sheet_detail=False, silent=True)
             if not current_data:
                 if not silent:
-                    print(f"❌ 重試後仍無法讀取檔案: {base_name}")
+                    print(f"❌ 重試後仍無法讀取檔案: {os.path.basename(file_path)}")
                 return False
         
         baseline_cells = old_baseline.get('cells', {})
         if baseline_cells == current_data:
             # 如果是輪詢且無變化，則不顯示任何內容
             if is_polling:
-                print(f"    [輪詢檢查] {base_name} 內容無變化。")
+                print(f"    [輪詢檢查] {os.path.basename(file_path)} 內容無變化。")
             return False
         
         any_sheet_has_changes = False
@@ -211,7 +212,7 @@ def compare_excel_changes(file_path, silent=False, event_number=None, is_polling
                     display_old,
                     display_new,
                     {
-                        'filename': base_name,
+                        'filename': os.path.basename(file_path),
                         'file_path': file_path,
                         'event_number': event_number,
                         'worksheet': worksheet_name,
@@ -233,7 +234,7 @@ def compare_excel_changes(file_path, silent=False, event_number=None, is_polling
         # 只有在非輪詢的第一次檢查且有變更時才更新基準線
         if any_sheet_has_changes and not silent and not is_polling:
             if settings.AUTO_UPDATE_BASELINE_AFTER_COMPARE:
-                print(f"🔄 自動更新基準線: {base_name}")
+                print(f"🔄 自動更新基準線: {os.path.basename(file_path)}")
                 updated_baseline = {
                     "last_author": new_author,
                     "content_hash": f"updated_{int(time.time())}",
@@ -241,8 +242,8 @@ def compare_excel_changes(file_path, silent=False, event_number=None, is_polling
                     "timestamp": datetime.now().isoformat()
                 }
                 from core.baseline import save_baseline
-                if not save_baseline(base_name, updated_baseline):
-                    print(f"[WARNING] 基準線更新失敗: {base_name}")
+                if not save_baseline(base_key, updated_baseline):
+                    print(f"[WARNING] 基準線更新失敗: {os.path.basename(file_path)}")
         
         return any_sheet_has_changes
         

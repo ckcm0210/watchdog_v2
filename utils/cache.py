@@ -3,7 +3,36 @@ import time
 import hashlib
 import shutil
 import logging
+import re
 import config.settings as settings
+
+_MAX_WIN_FILENAME = 240  # conservative cap to avoid MAX_PATH issues
+_HASH_LEN = 16
+_PREFIX_SEP = '_'
+
+def _is_in_cache(path: str) -> bool:
+    try:
+        cache_root = os.path.abspath(settings.CACHE_FOLDER)
+        p = os.path.abspath(path)
+        return os.path.commonpath([p, cache_root]) == cache_root
+    except Exception:
+        return False
+
+_def_invalid = re.compile(r'[\\/:*?"<>|]')
+
+def _safe_cache_basename(src_path: str) -> str:
+    """Build a safe cache file name: <md5[:16]>_<sanitized-and-trimmed-basename>"""
+    base = os.path.basename(src_path)
+    base = _def_invalid.sub('_', base)
+    name, ext = os.path.splitext(base)
+    prefix = hashlib.md5(src_path.encode('utf-8')).hexdigest()[:_HASH_LEN] + _PREFIX_SEP
+    # compute allowed length for name part
+    allowed = _MAX_WIN_FILENAME - len(prefix) - len(ext)
+    if allowed < 8:
+        allowed = 8
+    if len(name) > allowed:
+        name = name[:allowed]
+    return f"{prefix}{name}{ext}"
 
 def copy_to_cache(network_path, silent=False):
     if not settings.USE_LOCAL_CACHE:
@@ -11,13 +40,17 @@ def copy_to_cache(network_path, silent=False):
 
     try:
         os.makedirs(settings.CACHE_FOLDER, exist_ok=True)
+
+        # If the source already under cache root, return as-is to avoid prefix duplication
+        if _is_in_cache(network_path):
+            return network_path
+
         if not os.path.exists(network_path):
             raise FileNotFoundError(f"網絡檔案不存在: {network_path}")
         if not os.access(network_path, os.R_OK):
             raise PermissionError(f"無法讀取網絡檔案: {network_path}")
 
-        file_hash = hashlib.md5(network_path.encode('utf-8')).hexdigest()[:16]
-        cache_file = os.path.join(settings.CACHE_FOLDER, f"{file_hash}_{os.path.basename(network_path)}")
+        cache_file = os.path.join(settings.CACHE_FOLDER, _safe_cache_basename(network_path))
 
         if os.path.exists(cache_file):
             try:

@@ -19,6 +19,8 @@ SHOW_COMPRESSION_STATS = False          # 關閉壓縮統計顯示
 SHOW_DEBUG_MESSAGES = False             # 關閉調試訊息
 AUTO_UPDATE_BASELINE_AFTER_COMPARE = True  # 比較後自動更新基準線
 SCAN_ALL_MODE = True
+# 指定啟動掃描要建立基準線的子集資料夾（留空則使用 WATCH_FOLDERS 全部）
+SCAN_TARGET_FOLDERS = []
 MAX_CHANGES_TO_DISPLAY = 20 # 限制顯示的變更數量，0 表示不限制
 USE_LOCAL_CACHE = True
 CACHE_FOLDER = r"C:\Users\user\Desktop\watchdog\cache_folder"
@@ -57,6 +59,13 @@ LOG_FOLDER = r"C:\Users\user\Desktop\watchdog\log_folder"
 LOG_FILE_DATE = datetime.now().strftime('%Y%m%d')
 CSV_LOG_FILE = os.path.join(LOG_FOLDER, f"excel_change_log_{LOG_FILE_DATE}.csv.gz")
 SUPPORTED_EXTS = ('.xlsx', '.xlsm')
+# 只監控變更但不預先建立 baseline 的資料夾（例如整個磁碟機根目錄）。
+# 在這些路徑內，首次偵測到變更會先記錄資訊並建立 baseline，之後才進入正常比較流程。
+MONITOR_ONLY_FOLDERS = []
+# 監控資料夾中的排除清單（子資料夾）。位於此清單的路徑不做即時比較。
+WATCH_EXCLUDE_FOLDERS = []
+# 只監控變更根目錄中的排除清單（子資料夾）。位於此清單的路徑不做 monitor-only。
+MONITOR_ONLY_EXCLUDE_FOLDERS = []
 MAX_RETRY = 10
 RETRY_INTERVAL_SEC = 2
 USE_TEMP_COPY = True

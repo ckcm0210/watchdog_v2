@@ -57,6 +57,11 @@ def main():
     try:
         from ui.settings_ui import show_settings_ui
         show_settings_ui()
+        # 若使用者關閉設定視窗（取消啟動），不要繼續運行
+        from config.runtime import load_runtime_settings
+        if (load_runtime_settings() or {}).get('STARTUP_CANCELLED'):
+            print('使用者取消啟動，退出程式。')
+            return
     except Exception as e:
         print(f"⚠️ 設定 UI 啟動失敗，使用預設設定: {e}")
     
@@ -80,6 +85,8 @@ def main():
         settings.DEFAULT_COMPRESSION_FORMAT = validated_format
     
     print(f"📁 監控資料夾: {settings.WATCH_FOLDERS}")
+    if getattr(settings, 'MONITOR_ONLY_FOLDERS', None):
+        print(f"🛈  只監控變更的根目錄: {settings.MONITOR_ONLY_FOLDERS}")
     print(f"📊 支援格式: {settings.SUPPORTED_EXTS}")
     print(f"⚙️  設定檔案: 已載入")
     
@@ -98,7 +105,11 @@ def main():
     all_files = []
     if settings.SCAN_ALL_MODE:
         print("\n🔍 掃描所有 Excel 檔案...")
-        all_files = get_all_excel_files(settings.WATCH_FOLDERS)
+        scan_roots = list(settings.WATCH_FOLDERS or [])
+        # 若使用者指定 SCAN_TARGET_FOLDERS，僅針對該子集掃描
+        if getattr(settings, 'SCAN_TARGET_FOLDERS', None):
+            scan_roots = list(dict.fromkeys([r for r in settings.SCAN_TARGET_FOLDERS if r]))
+        all_files = get_all_excel_files(scan_roots)
         print(f"找到 {len(all_files)} 個 Excel 檔案")
     
     # 🔥 合併手動目標和掃描結果
@@ -114,7 +125,11 @@ def main():
     event_handler = ExcelFileEventHandler(active_polling_handler)
     observer = Observer()
     
-    for folder in settings.WATCH_FOLDERS:
+    # 對 WATCH_FOLDERS 與 MONITOR_ONLY_FOLDERS 都要註冊監控
+    watch_roots = list(dict.fromkeys(list(settings.WATCH_FOLDERS or []) + list(getattr(settings, 'MONITOR_ONLY_FOLDERS', []) or [])))
+    if not watch_roots:
+        print("   ⚠️  沒有任何監控根目錄（WATCH_FOLDERS 或 MONITOR_ONLY_FOLDERS 為空）")
+    for folder in watch_roots:
         if os.path.exists(folder):
             observer.schedule(event_handler, folder, recursive=True)
             print(f"   監控: {folder}")

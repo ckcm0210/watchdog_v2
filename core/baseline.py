@@ -217,7 +217,10 @@ def create_baseline_for_files_robust(xlsx_files, skip_force_baseline=True):
             break
         
         file_path = xlsx_files[i]
-        base_name = os.path.basename(file_path)
+        # 使用包含路徑哈希的 key，避免同名不同路徑覆蓋
+        from utils.helpers import _baseline_key_for_path
+        base_key = _baseline_key_for_path(file_path)
+        display_name = os.path.basename(file_path)
         
         if check_memory_limit():
             print(f"⚠️ 記憶體使用量過高，暫停10秒...")
@@ -228,11 +231,11 @@ def create_baseline_for_files_robust(xlsx_files, skip_force_baseline=True):
                 break
 
         file_start_time = time.time()
-        print(f"[{i+1:>2}/{total}] 處理中: {base_name} (記憶體: {get_memory_usage():.1f}MB)")
+        print(f"[{i+1:>2}/{total}] 處理中: {display_name} (記憶體: {get_memory_usage():.1f}MB)")
         
         cell_data = None
         try:
-            old_baseline = load_baseline(base_name)
+            old_baseline = load_baseline(base_key)
             old_hash = old_baseline['content_hash'] if old_baseline and 'content_hash' in old_baseline else None
             
             cell_data = dump_excel_cells_with_timeout(file_path)
@@ -256,13 +259,13 @@ def create_baseline_for_files_robust(xlsx_files, skip_force_baseline=True):
                         "cells": cell_data
                     }
                     
-                    if save_baseline(base_name, baseline_data):
+                    if save_baseline(base_key, baseline_data):
                         print(f"  結果: [OK]")
                         success_count += 1
                         
                         # 統計壓縮效果
                         if settings.SHOW_COMPRESSION_STATS:
-                            actual_file = get_baseline_file_with_extension(base_name)
+                            actual_file = get_baseline_file_with_extension(base_key)
                             if actual_file:
                                 stats = get_compression_stats(actual_file)
                                 if stats and stats['original_size']:

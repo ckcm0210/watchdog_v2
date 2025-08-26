@@ -172,4 +172,104 @@ Enhancement 5: Extend monitoring to other file types (e.g., Word) capturing last
   - TRACK_DIRECT_VALUE_CHANGES=True, TRACK_FORMULA_CHANGES=True, TRACK_EXTERNAL_REFERENCES=True,
   - IGNORE_INDIRECT_CHANGES=True, DISPLAY_ONLY_MEANINGFUL_CHANGES=True（新增）。
 
+## Update log (later on 2025-08-26)
+
+This section captures the additional work completed after the initial summary, the status of the five requested directions, key design decisions, risks, and a practical runbook for the next engineer.
+
+1) Executive summary of changes since initial summary
+- Settings UI: Expanded to near 1:1 coverage of config.settings, added path pickers (folder/file/save-file), added ordering/priorities, help texts, and auto-fill from defaults/runtime JSON. Fixed path-type fields not restoring on startup. Added line-wrapping for long help paragraphs.
+- Runtime apply: Hardened type coercion. SUPPORTED_EXTS normalized to tuple[str] with dot prefix; empty overrides ignored. Fixed JSON errors and scoping issues.
+- Monitor-only mode: Implemented MONITOR_ONLY_FOLDERS (with priority below WATCH_FOLDERS). On first change within those roots, we log path/mtime/last author and create a first baseline; subsequent changes then compare. Both WATCH_FOLDERS and MONITOR_ONLY_FOLDERS are now scheduled in the observer. Added exclusion lists for both modes: WATCH_EXCLUDE_FOLDERS, MONITOR_ONLY_EXCLUDE_FOLDERS.
+- Baseline key uniqueness: Baseline files now use "<original_filename>__<path_sha1_8>" to avoid collisions across folders. All console displays use original filename (no hash). Cache filenames sanitized and length-limited.
+- Noise reduction and stability checks: Polling stability switched to mtime-based; watcher now performs a silent compare before printing a change banner to reduce false positives.
+- Startup scan targeting: Added SCAN_TARGET_FOLDERS to optionally restrict startup baseline creation to a subset of WATCH_FOLDERS. Also added AUTO_SYNC_SCAN_TARGETS to auto-copy WATCH_FOLDERS into SCAN_TARGET_FOLDERS at UI load (optional).
+
+2) The five requested directions — status and outcome
+- 1. Startup Settings UI for parameters (Approach A)
+  - Status: Done and expanded. 1:1 coverage for most keys, with path pickers, new priorities, and richer help.
+  - Notes: UI now saves to config/runtime_settings.json; on startup values are auto-applied. Empty inputs no longer clobber defaults.
+- 2. Monitor entire drive(s) without pre-baseline; on change, log last-modified and author; baseline on-demand
+  - Status: Implemented via MONITOR_ONLY_FOLDERS with priority rules (WATCH_FOLDERS supersedes). First change logs info and creates baseline; later changes compare.
+  - Added exclusion list MONITOR_ONLY_EXCLUDE_FOLDERS.
+  - UI: Added fields, descriptions, and ordering.
+- 3. Normalize external reference paths in formulas (replace [n], unquote, UNC/backslash normalization)
+  - Status: Not yet integrated into dump/pretty/compare pipeline. Design remains: extract_external_refs once per workbook; pretty_formula to incorporate normalized paths; apply during baseline and compare.
+  - Risk: Without this, some external-ref-only changes may be misclassified or produce visual noise.
+- 4. Change classification strengthening (direct/indirect/external refresh)
+  - Status: Partially improved via silent preview compare and mtime-based polling; core classify logic still the same. Next: integrate ref_map-aware detection for external references and optional CSV audit of monitor-only first-seen events.
+- 5. Extend to non-Excel types (e.g., Word) with last modified/user logging
+  - Status: Not implemented. Requires docx core.xml parsing and a generalized handler, plus CSV schema.
+
+3) Additional key fixes and improvements
+- Fixed endswith crash by ensuring SUPPORTED_EXTS is a tuple[str] and normalized; tolerant of UI/JSON inputs with brackets/quotes; accepts semicolon/comma separators.
+- Fixed JSON error handling (no JSONEncodeError in stdlib), and added fallback path when RESUME_LOG_FILE points to a folder.
+- Fixed compare-time NameError by removing legacy base_name references.
+- Fixed UI runtime scope issue causing startup failure; consolidated to runtime.load_runtime_settings().
+- Path normalization: UI pickers and settings loader normalize to Windows backslashes.
+- Help text wrapping to avoid layout pushing buttons out of view.
+
+4) Current configuration map (selected)
+- WATCH_FOLDERS: list[str] — immediate compare roots (recursive). Priority over monitor-only. Exclusions: WATCH_EXCLUDE_FOLDERS.
+- MONITOR_ONLY_FOLDERS: list[str] — monitor-only roots; first change logs and creates baseline; later changes compare. Exclusions: MONITOR_ONLY_EXCLUDE_FOLDERS.
+- SCAN_ALL_MODE: bool — run startup baseline scan.
+- SCAN_TARGET_FOLDERS: list[str] — if non-empty, restrict startup scan to these roots (subset of WATCH_FOLDERS recommended).
+- AUTO_SYNC_SCAN_TARGETS: bool — at UI load, copy WATCH_FOLDERS into SCAN_TARGET_FOLDERS automatically.
+- SUPPORTED_EXTS: tuple[str] — e.g., ('.xlsx', '.xlsm'); normalized and safe.
+- CACHE_FOLDER, LOG_FOLDER, RESUME_LOG_FILE: str — path pickers; persist across runs; fallback for RESUME_LOG_FILE if invalid.
+- DEFAULT_COMPRESSION_FORMAT: 'lz4'|'zstd'|'gzip'; LZ4/Zstd/Gzip levels with detailed help text.
+- ENABLE_TIMEOUT, FILE_TIMEOUT_SECONDS; ENABLE_MEMORY_MONITOR, MEMORY_LIMIT_MB.
+- POLLING_SIZE_THRESHOLD_MB, DENSE/SPARSE_POLLING_INTERVAL/DURATION; DEBOUNCE_INTERVAL_SEC.
+- FORMULA_ONLY_MODE, TRACK_* flags, IGNORE_INDIRECT_CHANGES; AUTO_UPDATE_BASELINE_AFTER_COMPARE.
+
+5) Dependency notes
+- main.py: initializes logging, UI, signals; runs startup scan using WATCH_FOLDERS or SCAN_TARGET_FOLDERS; schedules both WATCH_FOLDERS and MONITOR_ONLY_FOLDERS.
+- core/watcher.py: event handler with debounce; priority resolution (WATCH_FOLDERS first); monitor-only first-seen handling; mtime-based polling stability and silent preview compare to reduce noise.
+- core/comparison.py: loads baseline via base_key; compares and prints aligned table; optional CSV logging for meaningful changes. Console always shows original filename.
+- core/baseline.py: creates/loads/saves compressed baselines; base_key naming prevents collisions; archive support; progress save with fallback.
+- utils/cache.py: safe cache filenames with invalid char scrub and length cap; skip re-prefixing if source already in cache.
+- utils/helpers.py: baseline key generation removes stacked md5 prefixes, truncates to sane length, appends 8-char path hash; progress save fallback.
+- ui/settings_ui.py: param spec, ordering, path pickers, auto-fill, preset import/export; AUTO_SYNC_SCAN_TARGETS optional; path normalization; help wraps.
+- config/runtime.py: type coercion + normalization.
+
+6) Known pitfalls and guardrails
+- Do not place CACHE_FOLDER under a watched root unless you intend those cached files to trigger events; consider ignoring cache folder at watcher level if noise persists.
+- SCAN_TARGET_FOLDERS should be a subset of WATCH_FOLDERS to ensure those folders are actually observed at runtime.
+- MONITOR_ONLY_FOLDERS covers large roots; always define MONITOR_ONLY_EXCLUDE_FOLDERS for system folders (e.g., C:\Windows) to reduce noise and access issues.
+- Ensure SUPPORTED_EXTS is valid; UI and runtime normalize but future edits should stick to dot-prefixed lowercase.
+- On Windows MAX_PATH concerns: cache filenames are capped; baseline names are concise; still avoid extremely deep LOG_FOLDER.
+
+7) Runbook (quick start)
+- Install requirements; start main.py. On first run, the Settings UI opens.
+- Configure:
+  1. WATCH_FOLDERS (and WATCH_EXCLUDE_FOLDERS)
+  2. SCAN_TARGET_FOLDERS or toggle AUTO_SYNC_SCAN_TARGETS
+  3. MONITOR_ONLY_FOLDERS (and MONITOR_ONLY_EXCLUDE_FOLDERS)
+  4. Paths: CACHE_FOLDER, LOG_FOLDER, RESUME_LOG_FILE
+  5. Format: DEFAULT_COMPRESSION_FORMAT and levels
+  6. Flags: SCAN_ALL_MODE, timeout/memory, TRACK_* etc.
+- Save and start. Startup scan will build baselines per SCAN_TARGET_FOLDERS (or all WATCH_FOLDERS). Console shows status and then waits for events.
+
+8) Test checklist
+- UI opens; all path fields prepopulated from runtime; SUPPORTED_EXTS shows .xlsx,.xlsm and scan finds files.
+- WATCH_FOLDERS event triggers immediate comparison; MONITOR_ONLY_FOLDERS first change logs and creates baseline; second change compares.
+- Exclusions work: events under excluded subfolders are ignored for the respective mode.
+- Baseline filenames show as <original>__<hash8>; console displays original only.
+- Polling stabilizes quickly once mtime stops changing; no infinite "still changing".
+
+9) Open items and next steps (handover to next engineer)
+- External reference normalization (priority: high for correctness in cross-link heavy workbooks):
+  - Implement extract_external_refs mapping into dump + pretty_formula; normalize paths unquote + os.path.normpath; ensure both baseline and current use normalized forms to avoid false diffs.
+- Change classification refinement (priority: medium):
+  - Ref-map aware has_external_reference; optional CSV logging of monitor-only first-seen events.
+- UI: WATCH_FOLDERS live-sync to SCAN_TARGET_FOLDERS (merge mode) when AUTO_SYNC_SCAN_TARGETS is enabled:
+  - Current: auto-sync on UI load only; proposal: intercept add/remove/clear handlers of WATCH_FOLDERS paths control and apply incremental sync to SCAN_TARGET_FOLDERS while preserving user-removed entries.
+- Optional ignore rules: add a checkbox to ignore CACHE_FOLDER in watcher scheduling to eliminate cache noise entirely.
+- Usability: Add a manual "Sync from WATCH_FOLDERS" button to SCAN_TARGET_FOLDERS paths list.
+
+10) Information desired for tomorrow's continuation
+- Confirm desired live-sync behavior between WATCH_FOLDERS and SCAN_TARGET_FOLDERS: hard sync (overwrite) vs merge sync (preserve manual removals). Current preference inferred: merge sync.
+- Confirm whether to exclude CACHE_FOLDER from observer scheduling by default.
+- Provide list of typical external reference patterns and sample workbooks to validate normalization logic.
+- Confirm whether to log monitor-only first-seen events into CSV, and desired CSV schema for those entries.
+
 End of document.

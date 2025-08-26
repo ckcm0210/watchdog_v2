@@ -1,28 +1,66 @@
 {
   "WATCH_FOLDERS": [
-    "C:\\Users\\user\\Desktop\\Test"
+    "C:\\Users\\user\\Desktop\\pytest - 複製\\!space folder"
   ],
+  "WATCH_EXCLUDE_FOLDERS": [],
+  "MANUAL_BASELINE_TARGET": [],
+  "SCAN_TARGET_FOLDERS": [],
+  "AUTO_SYNC_SCAN_TARGETS": false,
+  "SCAN_ALL_MODE": true,
+  "CACHE_FOLDER": "C:\\Users\\user\\Desktop\\watchdog\\cache_folder",
+  "MONITOR_ONLY_FOLDERS": [],
+  "RESUME_LOG_FILE": "C:\\Users\\user\\Desktop\\watchdog\\resume_log\\baseline_progress.log",
+  "MONITOR_ONLY_EXCLUDE_FOLDERS": [],
+  "LOG_FOLDER": "C:\\Users\\user\\Desktop\\watchdog\\log_folder",
   "SUPPORTED_EXTS": [
     ".xlsx",
     ".xlsm"
   ],
-  "SCAN_ALL_MODE": true,
   "USE_LOCAL_CACHE": true,
-  "CACHE_FOLDER": "C:\\Users\\user\\Desktop\\watchdog\\cache_folder",
   "ENABLE_TIMEOUT": true,
   "FILE_TIMEOUT_SECONDS": "120",
   "ENABLE_MEMORY_MONITOR": true,
   "MEMORY_LIMIT_MB": "2048",
-  "DEFAULT_COMPRESSION_FORMAT": "lz4",
-  "AUTO_UPDATE_BASELINE_AFTER_COMPARE": true,
+  "ENABLE_RESUME": true,
+  "DEBOUNCE_INTERVAL_SEC": "2",
+  "FORMULA_ONLY_MODE": true,
   "TRACK_DIRECT_VALUE_CHANGES": true,
   "TRACK_FORMULA_CHANGES": true,
   "TRACK_EXTERNAL_REFERENCES": true,
   "IGNORE_INDIRECT_CHANGES": true,
   "MAX_CHANGES_TO_DISPLAY": "20",
+  "AUTO_UPDATE_BASELINE_AFTER_COMPARE": true,
+  "DEFAULT_COMPRESSION_FORMAT": "lz4",
+  "LZ4_COMPRESSION_LEVEL": "1",
+  "ZSTD_COMPRESSION_LEVEL": "3",
+  "GZIP_COMPRESSION_LEVEL": "6",
+  "ENABLE_ARCHIVE_MODE": true,
+  "ARCHIVE_AFTER_DAYS": "7",
+  "ARCHIVE_COMPRESSION_FORMAT": "zstd",
+  "SHOW_COMPRESSION_STATS": true,
+  "SHOW_DEBUG_MESSAGES": false,
+  "ENABLE_FAST_MODE": true,
+  "MAX_RETRY": "10",
+  "RETRY_INTERVAL_SEC": "2",
+  "USE_TEMP_COPY": true,
+  "WHITELIST_USERS": [
+    "ckcm0210",
+    "yourwhiteuser"
+  ],
+  "LOG_WHITELIST_USER_CHANGE": true,
+  "FORCE_BASELINE_ON_FIRST_SEEN": [
+    "\\\\network_drive\\\\your_folder1\\\\must_first_baseline.xlsx",
+    "force_this_file.xlsx"
+  ],
   "POLLING_SIZE_THRESHOLD_MB": "10",
   "DENSE_POLLING_INTERVAL_SEC": "10",
   "DENSE_POLLING_DURATION_SEC": "15",
   "SPARSE_POLLING_INTERVAL_SEC": "15",
-  "SPARSE_POLLING_DURATION_SEC": "15"
+  "SPARSE_POLLING_DURATION_SEC": "15",
+  "ENABLE_BLACK_CONSOLE": true,
+  "CONSOLE_POPUP_ON_COMPARISON": true,
+  "CONSOLE_ALWAYS_ON_TOP": false,
+  "CONSOLE_TEMP_TOPMOST_DURATION": "5",
+  "CONSOLE_INITIAL_TOPMOST_DURATION": "C:\\Users\\user\\Desktop\\watchdog\\cache_folder",
+  "STARTUP_CANCELLED": true
 }

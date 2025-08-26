@@ -68,7 +68,7 @@ def _coerce_type(key: str, new_value: Any):
                     continue
                 # normalize spacing, quotes and parentheses
                 x = str(x).strip().lower()
-                x = x.strip(" ' \"()")
+                x = x.strip(" ' \"()[]{}")
                 if not x:
                     continue
                 if not x.startswith('.'):
