@@ -14,40 +14,91 @@ from openpyxl.worksheet.formula import ArrayFormula
 import config.settings as settings
 from utils.cache import copy_to_cache
 import logging
+import urllib.parse
 
 def extract_external_refs(xlsx_path):
     """
     解析 Excel xlsx 中 external reference mapping: [n] -> 路徑
+    支援兩種來源：
+    - xl/externalLinks/externalLinkN.xml 的 externalBookPr@href
+    - xl/externalLinks/_rels/externalLinkN.xml.rels 中 Relationship@Target
     """
     ref_map = {}
     try:
         with zipfile.ZipFile(xlsx_path, 'r') as z:
             rels = ET.fromstring(z.read('xl/_rels/workbook.xml.rels'))
             for rel in rels.findall('{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
-                if rel.attrib['Type'].endswith('/externalLink'):
-                    target = rel.attrib['Target']
+                if rel.attrib.get('Type','').endswith('/externalLink'):
+                    target = rel.attrib.get('Target','')  # e.g., externalLinks/externalLink1.xml
                     m = re.search(r'externalLink(\d+)\.xml', target)
-                    if m:
-                        num = int(m.group(1))
+                    if not m:
+                        continue
+                    num = int(m.group(1))
+                    path = ''
+                    # 1) 嘗試 externalLinkN.xml 的 externalBookPr@href
+                    try:
+                        link_xml = z.read(f'xl/{target}')
+                        link_tree = ET.fromstring(link_xml)
+                        book_elem = link_tree.find('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}externalBookPr')
+                        if book_elem is not None:
+                            path = book_elem.attrib.get('href', '')
+                    except Exception:
+                        pass
+                    # 2) 若仍無，嘗試 externalLinks/_rels/externalLinkN.xml.rels 的 Relationship@Target
+                    if not path:
                         try:
-                            link_xml = z.read(f'xl/{target}')
-                            link_tree = ET.fromstring(link_xml)
-                            book_elem = link_tree.find('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}externalBookPr')
-                            if book_elem is not None:
-                                path = book_elem.attrib.get('href', '')
-                            else:
-                                path = ''
-                            ref_map[num] = path
-                        except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
-                            logging.error(f"解析外部連結XML失敗: {target}, 錯誤: {e}")
-                            ref_map[num] = ''
+                            rels_path = f"xl/externalLinks/_rels/externalLink{num}.xml.rels"
+                            if rels_path in z.namelist():
+                                link_rels_xml = z.read(rels_path)
+                                link_rels = ET.fromstring(link_rels_xml)
+                                rel_node = link_rels.find('{http://schemas.openxmlformats.org/package/2006/relationships}Relationship')
+                                if rel_node is not None:
+                                    path = rel_node.attrib.get('Target','')
+                        except Exception:
+                            pass
+                    ref_map[num] = path or ''
     except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
         logging.error(f"提取外部參照時發生錯誤: {xlsx_path}, 錯誤: {e}")
     return ref_map
 
+def _normalize_path(p: str) -> str:
+    if not p:
+        return p
+    s = urllib.parse.unquote(p.strip())
+    # Handle file: scheme robustly
+    try:
+        u = urllib.parse.urlparse(s)
+        if u.scheme == 'file':
+            if u.netloc:  # UNC: file://server/share/path
+                s = f"\\\\{u.netloc}\\{u.path.lstrip('/').replace('/', '\\')}"
+            else:  # local: file:///C:/path or file:/C:/path or file:\C:\path
+                rest = u.path or s[5:]
+                rest = rest.lstrip('/\\')
+                s = rest.replace('/', '\\')
+    except Exception:
+        pass
+    # Fallback: strip 'file:' prefix crudely if present
+    if s.lower().startswith('file:'):
+        s = s[5:].lstrip('/\\')
+    # normalize backslashes
+    s = s.replace('/', '\\')
+    # collapse duplicate backslashes but keep UNC prefix
+    if s.startswith('\\\\'):
+        prefix = '\\'
+        t = s[2:]
+        while '\\' in t:
+            t = t.replace('\\\\', '\\')
+        s = '\\' + t
+    else:
+        while '\\' in s and '\\\\' in s:
+            s = s.replace('\\\\', '\\')
+    return s
+
+
 def pretty_formula(formula, ref_map=None):
     """
-    顯示 formula 時，如果有 [n]Table! 這種 external workbook reference，會顯示來源路徑
+    將公式中的外部參照 [n]Sheet! 還原為 'full\\normalized\\path'!Sheet! 的可讀形式。
+    同時保留 Excel 語法結構，避免造成假差異。
     """
     if formula is None:
         return None
@@ -59,14 +110,27 @@ def pretty_formula(formula, ref_map=None):
         formula_str = str(formula)
     
     if ref_map:
-        def repl(m):
+        # 1) 直接替換形如 [n]Sheet! 為 'path'!Sheet!
+        def repl_path_with_sheet(m):
             n = int(m.group(1))
-            path = ref_map.get(n, '')
-            if path:
-                return f"[外部檔案{n}: {path}]{m.group(0)}"
-            else:
-                return m.group(0)
-        return re.sub(r'\[(\d+)\][A-Za-z0-9_]+!', repl, formula_str)
+            sheet = m.group(2)
+            raw_path = ref_map.get(n, '')
+            norm_path = _normalize_path(raw_path)
+            if norm_path:
+                return f"'{norm_path}'!{sheet}!"
+            return m.group(0)
+        s = re.sub(r"\[(\d+)\]([^!\]]+)!", repl_path_with_sheet, formula_str)
+        
+        # 2) 對其餘殘留的 [n] 標記（未帶 sheet 名）插入可讀提示
+        def repl_annotate(m):
+            n = int(m.group(1))
+            raw_path = ref_map.get(n, '')
+            norm_path = _normalize_path(raw_path)
+            if norm_path:
+                return f"[外部檔案{n}: {norm_path}]"
+            return m.group(0)
+        s = re.sub(r"\[(\d+)\]", repl_annotate, s)
+        return s
     else:
         return formula_str
 
@@ -159,6 +223,8 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):
         if not silent and show_sheet_detail: 
             print(f"   📋 工作表數量: {worksheet_count}")
         
+        # 解析一次外部參照映射，供 prettify 使用
+        ref_map = extract_external_refs(local_path)
         for idx, ws in enumerate(wb.worksheets, 1):
             cell_count = 0
             ws_data = {}
@@ -171,6 +237,9 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):
                             fstr = cell.formula
                         else:
                             fstr = get_cell_formula(cell)
+                        # 對外部參照做正規化展示（還原路徑，解 %20，統一反斜線）
+                        if fstr:
+                            fstr = pretty_formula(fstr, ref_map=ref_map)
                         vstr = serialize_cell_value(cell.value)
                         if fstr is not None or vstr is not None:
                             ws_data[cell.coordinate] = {"formula": fstr, "value": vstr}

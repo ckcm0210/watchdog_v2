@@ -63,8 +63,10 @@ def print_aligned_console_diff(old_data, new_data, file_info=None, max_display_c
             return "(Empty)"
         if isinstance(cell_value, dict):
             formula = cell_value.get("formula")
-            if formula:
-                return f"={formula}"
+            if formula is not None and formula != "":
+                fstr = str(formula)
+                # 避免重複等號：如果已經是以 '=' 開頭就不要再加
+                return fstr if fstr.startswith('=') else f"={fstr}"
             if "value" in cell_value:
                 return repr(cell_value["value"])
         return repr(cell_value)
