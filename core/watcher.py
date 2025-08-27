@@ -74,6 +74,7 @@ class ActivePollingHandler:
             last_mtime = current_mtime
             from core.comparison import compare_excel_changes, set_current_event_number
             set_current_event_number(event_number)
+            # 在輪詢期間做可見比較；配合「比較後即時更新基準線」，可避免重覆打印相同變更
             has_changes = compare_excel_changes(file_path, silent=False, event_number=event_number, is_polling=True)
 
         with self.lock:
@@ -112,6 +113,16 @@ class ExcelFileEventHandler(FileSystemEventHandler):
         self.last_event_times = {}
         self.event_counter = 0
         
+    def _is_cache_ignored(self, path: str) -> bool:
+        try:
+            if getattr(settings, 'IGNORE_CACHE_FOLDER', False) and getattr(settings, 'CACHE_FOLDER', None):
+                p = os.path.abspath(path)
+                c = os.path.abspath(settings.CACHE_FOLDER)
+                return os.path.commonpath([p, c]) == c
+        except Exception:
+            pass
+        return False
+
     def on_created(self, event):
         """
         檔案建立事件處理
@@ -180,6 +191,10 @@ class ExcelFileEventHandler(FileSystemEventHandler):
             return
             
         file_path = event.src_path
+        
+        # 忽略 cache 目錄下的所有事件
+        if self._is_cache_ignored(file_path):
+            return
         
         # 檢查是否為支援的 Excel 檔案
         if not file_path.lower().endswith(settings.SUPPORTED_EXTS):

@@ -1,4 +1,6 @@
 # Excel Watchdog Project Summary
+
+Note: A newer version of this document is available: Watchdog_Project_Summary_2025-08-27.md (includes a detailed architecture map, end-to-end flow, and file-lock avoidance guidance).
 Generated at: 2025-08-26 00:00 UTC
 
 This document summarizes the current codebase, provides per-file roles, counts (lines/defs/classes), a dependency map, and recommendations. It also includes proposals addressing five requested enhancements.

@@ -70,7 +70,8 @@ def _normalize_path(p: str) -> str:
         u = urllib.parse.urlparse(s)
         if u.scheme == 'file':
             if u.netloc:  # UNC: file://server/share/path
-                s = f"\\\\{u.netloc}\\{u.path.lstrip('/').replace('/', '\\')}"
+                path_part = u.path.lstrip('/').replace('/', '\\')
+                s = "\\\\" + u.netloc + "\\" + path_part
             else:  # local: file:///C:/path or file:/C:/path or file:\C:\path
                 rest = u.path or s[5:]
                 rest = rest.lstrip('/\\')
@@ -95,6 +96,27 @@ def _normalize_path(p: str) -> str:
     return s
 
 
+def _excel_external_prefix(norm_path: str, sheet: str) -> str:
+    """
+    將歸一化路徑與工作表組裝為 Excel 標準外部參照前綴：
+    'C:\\dir\\[Workbook.xlsx]Sheet Name'
+    注意：整段（目錄 + [檔名] + 工作表）以單引號包裹；工作表名中的單引號需轉義為兩個單引號。
+    """
+    if not norm_path:
+        return None
+    # 分割目錄與檔名
+    base = os.path.basename(norm_path)
+    dir_ = os.path.dirname(norm_path)
+    # 若 base 沒有副檔名，原樣處理
+    fname = base
+    sheet_escaped = (sheet or '').replace("'", "''")
+    inside = ''
+    if dir_:
+        inside = dir_.rstrip('\\') + '\\'
+    inside += f"[{fname}]" + sheet_escaped
+    return f"'{inside}'"
+
+
 def pretty_formula(formula, ref_map=None):
     """
     將公式中的外部參照 [n]Sheet! 還原為 'full\\normalized\\path'!Sheet! 的可讀形式。
@@ -117,7 +139,8 @@ def pretty_formula(formula, ref_map=None):
             raw_path = ref_map.get(n, '')
             norm_path = _normalize_path(raw_path)
             if norm_path:
-                return f"'{norm_path}'!{sheet}!"
+                prefix = _excel_external_prefix(norm_path, sheet)
+                return f"{prefix}!"
             return m.group(0)
         s = re.sub(r"\[(\d+)\]([^!\]]+)!", repl_path_with_sheet, formula_str)
         
@@ -160,12 +183,44 @@ def serialize_cell_value(value):
     return str(value)
 
 def get_excel_last_author(path):
+    """
+    以非鎖定方式讀取 Excel 檔案的最後修改者：
+    - 優先從快取副本的 docProps/core.xml 解析 cp:lastModifiedBy（不開啟原檔，不用 openpyxl）。
+    - 如遇非常規檔案或解析失敗，才退回以 openpyxl 讀取「快取檔」。
+    """
     try:
-        wb = load_workbook(path, read_only=True)
-        author = wb.properties.lastModifiedBy
-        wb.close()
-        del wb
-        return author
+        # 先複製到本地快取，避免直接打開原始檔案
+        local_path = copy_to_cache(path, silent=True)
+        if not local_path or not os.path.exists(local_path):
+            return None
+        try:
+            with zipfile.ZipFile(local_path, 'r') as z:
+                core_xml = z.read('docProps/core.xml')
+                root = ET.fromstring(core_xml)
+                ns = {
+                    'cp': 'http://schemas.openxmlformats.org/package/2006/metadata/core-properties',
+                    'dc': 'http://purl.org/dc/elements/1.1/'
+                }
+                node = root.find('cp:lastModifiedBy', ns)
+                if node is None:
+                    node = root.find('dc:lastModifiedBy', ns)  # 極少數模板可能使用 dc
+                author = (node.text or '').strip() if node is not None else None
+                return author or None
+        except (KeyError, zipfile.BadZipFile, ET.ParseError):
+            # 結構異常或非 zip 格式（例如舊 xls），退回 openpyxl（仍用本地快取檔）
+            pass
+
+        # Fallback：對快取檔使用 openpyxl（不會鎖定原檔）
+        try:
+            wb = load_workbook(local_path, read_only=True)
+            author = wb.properties.lastModifiedBy
+            wb.close()
+            del wb
+            return author
+        except Exception as e:
+            logging.warning(f"openpyxl 讀取核心屬性失敗: {local_path}, {e}")
+            return None
+
     except FileNotFoundError:
         logging.warning(f"檔案未找到: {path}")
         return None
@@ -208,9 +263,10 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):
             print(f"   📊 檔案大小: {os.path.getsize(path)/(1024*1024):.1f} MB")
         
         local_path = copy_to_cache(path, silent=silent)
-        
-        # 複製完 sleep 一下，減race condition
-        time.sleep(0.2)
+        if not local_path or not os.path.exists(local_path):
+            if not silent:
+                print("   ❌ 無法使用快取副本（嚴格模式下不會讀取原檔），略過此檔案。")
+            return None
         
         read_only_mode = True
         if not silent: 
@@ -225,9 +281,13 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):
         
         # 解析一次外部參照映射，供 prettify 使用
         ref_map = extract_external_refs(local_path)
+        formula_cells_global = 0
+        formula_coords_by_sheet = {}
+
         for idx, ws in enumerate(wb.worksheets, 1):
             cell_count = 0
             ws_data = {}
+            formula_addrs = []
             
             if ws.max_row > 1 or ws.max_column > 1:
                 for row in ws.iter_rows(values_only=False):  # ⚡️ 保證每個 cell 都係 cell object
@@ -240,6 +300,8 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):
                         # 對外部參照做正規化展示（還原路徑，解 %20，統一反斜線）
                         if fstr:
                             fstr = pretty_formula(fstr, ref_map=ref_map)
+                            formula_addrs.append(cell.coordinate)
+                            formula_cells_global += 1
                         vstr = serialize_cell_value(cell.value)
                         if fstr is not None or vstr is not None:
                             ws_data[cell.coordinate] = {"formula": fstr, "value": vstr}
@@ -250,6 +312,40 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):
             
             if ws_data: 
                 result[ws.title] = ws_data
+            if formula_addrs:
+                formula_coords_by_sheet[ws.title] = formula_addrs
+
+        # Phase 2：可選的 cached value 比對（僅對公式格），避免外部參照刷新導致假變更
+        try:
+            if getattr(settings, 'ENABLE_FORMULA_VALUE_CHECK', False) and formula_cells_global > 0:
+                cap = int(getattr(settings, 'MAX_FORMULA_VALUE_CELLS', 50000))
+                if formula_cells_global > cap:
+                    if not silent:
+                        print(f"   ⏩ 公式格數量 {formula_cells_global} 超過上限 {cap}，略過值比對。")
+                else:
+                    if not silent:
+                        print(f"   🔍 讀取公式儲存格的 cached value（共 {formula_cells_global} 格）…")
+                    wb_values = safe_load_workbook(local_path, read_only=True, data_only=True)
+                    try:
+                        for sheet_name, coords in formula_coords_by_sheet.items():
+                            if sheet_name not in wb_values.sheetnames:
+                                continue
+                            ws2 = wb_values[sheet_name]
+                            for addr in coords:
+                                try:
+                                    val = ws2[addr].value
+                                except Exception:
+                                    val = None
+                                sval = serialize_cell_value(val)
+                                if sheet_name in result and addr in result[sheet_name]:
+                                    result[sheet_name][addr]['cached_value'] = sval
+                    finally:
+                        try:
+                            wb_values.close()
+                        except Exception:
+                            pass
+        except Exception as e:
+            logging.warning(f"讀取 cached value 失敗：{e}")
         
         wb.close()
         wb = None

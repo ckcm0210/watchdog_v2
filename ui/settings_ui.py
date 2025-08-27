@@ -167,6 +167,18 @@ PARAMS_SPEC = [
         'type': 'bool',
     },
     {
+        'key': 'ENABLE_FORMULA_VALUE_CHECK',
+        'label': '外部參照：值不變視為無變更',
+        'help': '當外部參照公式的字串因刷新而有差異，但其儲存的數值（cached value）沒有改變時，忽略該變更（避免假警報）。只對快取副本進行 read-only 讀取。',
+        'type': 'bool',
+    },
+    {
+        'key': 'MAX_FORMULA_VALUE_CELLS',
+        'label': '值比對的最大公式格數（跨表合計）',
+        'help': '為了效能，只對前 N 個含公式的儲存格查詢其 cached value。超過此數量時跳過值比對（仍會比較公式字串）。',
+        'type': 'int',
+    },
+    {
         'key': 'TRACK_EXTERNAL_REFERENCES',
         'label': '追蹤外部參照更新',
         'help': '公式不變、但外部連結刷新導致結果變更時記錄。',
@@ -297,6 +309,70 @@ PARAMS_SPEC = [
         'label': '使用暫存複本',
         'help': '比較前先複製檔案到暫存位置以避免占用與鎖檔。',
         'type': 'bool',
+    },
+
+    # 進階／穩定性（複製與嚴格模式）
+    {
+        'key': 'STRICT_NO_ORIGINAL_READ',
+        'label': '嚴格模式：永不開原始檔',
+        'help': '啟用後，任何讀取都必須來自本地快取副本；若複製到快取最終失敗，會略過本次處理，絕不打開原始檔（避免鎖檔）。',
+        'type': 'bool',
+    },
+    {
+        'key': 'IGNORE_CACHE_FOLDER',
+        'label': '忽略快取資料夾事件',
+        'help': '忽略 CACHE_FOLDER 內所有檔案事件，避免快取本身引起的監控噪音（建議啟用）。',
+        'type': 'bool',
+    },
+    {
+        'key': 'COPY_RETRY_COUNT',
+        'label': '複製重試次數',
+        'help': '將來源檔案複製到本地快取時的最大重試次數。來源檔案正被儲存／網路不穩時可提高此值。',
+        'type': 'int',
+    },
+    {
+        'key': 'COPY_RETRY_BACKOFF_SEC',
+        'label': '重試退避（秒）',
+        'help': '兩次重試之間的等待秒數（可輸入小數）。會按嘗試次數逐步增加等待，例如 1.0 → 2.0 → 3.0 秒。',
+        'type': 'text',
+    },
+    {
+        'key': 'COPY_CHUNK_SIZE_MB',
+        'label': '分塊複製大小 (MB)',
+        'help': '以較小區塊逐段讀寫來源檔，可降低一次性長時間把持來源句柄的風險。0 表示關閉。',
+        'type': 'int',
+    },
+    {
+        'key': 'COPY_POST_SLEEP_SEC',
+        'label': '複製完成後短暫等待（秒）',
+        'help': '複製完成後等待短暫時間（可輸入小數）讓檔案系統穩定，避免隨後讀取時競態。',
+        'type': 'text',
+    },
+    {
+        'key': 'COPY_STABILITY_CHECKS',
+        'label': '複製前穩定性檢查次數',
+        'help': '開始複製前，連續 N 次檢查來源檔的修改時間（mtime）一致才開始複製。',
+        'type': 'int',
+    },
+    {
+        'key': 'COPY_STABILITY_INTERVAL_SEC',
+        'label': '穩定性檢查間隔（秒）',
+        'help': '兩次 mtime 穩定性檢查之間的等待秒數（可輸入小數）。',
+        'type': 'text',
+    },
+    {
+        'key': 'COPY_STABILITY_MAX_WAIT_SEC',
+        'label': '穩定性檢查最大等待（秒）',
+        'help': '最多等待多少秒來達到所需的穩定檢查次數；超時則本次複製跳過。',
+        'type': 'text',
+    },
+
+    # 日誌／去重
+    {
+        'key': 'LOG_DEDUP_WINDOW_SEC',
+        'label': 'CSV 去重時間窗（秒）',
+        'help': '在此秒數內，相同檔案＋工作表＋相同內容的變更只記錄一次至 CSV（避免短時間重覆記錄同一批變更）。',
+        'type': 'int',
     },
 
     # 白名單

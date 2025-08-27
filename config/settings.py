@@ -10,6 +10,10 @@ TRACK_EXTERNAL_REFERENCES = True       # 追蹤外部參照更新
 TRACK_DIRECT_VALUE_CHANGES = True      # 追蹤直接值變更
 TRACK_FORMULA_CHANGES = True           # 追蹤公式變更
 IGNORE_INDIRECT_CHANGES = True         # 忽略間接影響
+# 當外部參照公式的字串有改變，但實際數值（cached value）未變時，視為「無實質變更」
+ENABLE_FORMULA_VALUE_CHECK = False
+# 為了效能，只對前 N 個公式儲存格（跨所有表合計）查詢 cached value，超過則跳過值比對
+MAX_FORMULA_VALUE_CELLS = 50000
 ENABLE_BLACK_CONSOLE = True
 CONSOLE_POPUP_ON_COMPARISON = True
 CONSOLE_ALWAYS_ON_TOP = False           # 新增：是否始終置頂
@@ -24,6 +28,19 @@ SCAN_TARGET_FOLDERS = []
 MAX_CHANGES_TO_DISPLAY = 20 # 限制顯示的變更數量，0 表示不限制
 USE_LOCAL_CACHE = True
 CACHE_FOLDER = r"C:\Users\user\Desktop\watchdog\cache_folder"
+# 嚴格模式：永不開原檔（copy 失敗則跳過處理）
+STRICT_NO_ORIGINAL_READ = True
+# 複製重試次數與退避（秒）
+COPY_RETRY_COUNT = 8
+COPY_RETRY_BACKOFF_SEC = 1.0
+# （可選）分塊複製的塊大小（MB），0 表示不用分塊特別處理
+COPY_CHUNK_SIZE_MB = 4
+# 複製完成後的短暫等待（秒），給檔案系統穩定
+COPY_POST_SLEEP_SEC = 0.2
+# 複製前穩定性預檢：連續 N 次 mtime 不變才開始複製
+COPY_STABILITY_CHECKS = 2
+COPY_STABILITY_INTERVAL_SEC = 1.0
+COPY_STABILITY_MAX_WAIT_SEC = 3.0
 ENABLE_FAST_MODE = True
 ENABLE_TIMEOUT = True
 FILE_TIMEOUT_SECONDS = 120
@@ -66,11 +83,15 @@ MONITOR_ONLY_FOLDERS = []
 WATCH_EXCLUDE_FOLDERS = []
 # 只監控變更根目錄中的排除清單（子資料夾）。位於此清單的路徑不做 monitor-only。
 MONITOR_ONLY_EXCLUDE_FOLDERS = []
+# 忽略 CACHE_FOLDER 下的所有事件
+IGNORE_CACHE_FOLDER = True
 MAX_RETRY = 10
 RETRY_INTERVAL_SEC = 2
 USE_TEMP_COPY = True
 WHITELIST_USERS = ['ckcm0210', 'yourwhiteuser']
 LOG_WHITELIST_USER_CHANGE = True
+# CSV 記錄去重時間窗（秒）：相同內容在此時間窗內不重複記錄
+LOG_DEDUP_WINDOW_SEC = 300
 FORCE_BASELINE_ON_FIRST_SEEN = [
     r"\\network_drive\\your_folder1\\must_first_baseline.xlsx",
     "force_this_file.xlsx"

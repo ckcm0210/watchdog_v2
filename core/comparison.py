@@ -14,6 +14,8 @@ from utils.helpers import get_file_mtime
 from core.excel_parser import pretty_formula, extract_external_refs, get_excel_last_author
 from core.baseline import load_baseline, baseline_file_path
 import logging
+import hashlib
+import json as _json
 
 # ... [print_aligned_console_diff 和其他輔助函數保持不變] ...
 def print_aligned_console_diff(old_data, new_data, file_info=None, max_display_changes=0):
@@ -233,8 +235,8 @@ def compare_excel_changes(file_path, silent=False, event_number=None, is_polling
                     if not is_polling:
                         log_meaningful_changes_to_csv(file_path, worksheet_name, meaningful_changes, new_author)
 
-        # 只有在非輪詢的第一次檢查且有變更時才更新基準線
-        if any_sheet_has_changes and not silent and not is_polling:
+        # 任何可見的比較（非靜默）且確實有變更時，都即時更新基準線（包括輪詢中的可見比較）
+        if any_sheet_has_changes and not silent:
             if settings.AUTO_UPDATE_BASELINE_AFTER_COMPARE:
                 print(f"🔄 自動更新基準線: {os.path.basename(file_path)}")
                 updated_baseline = {
@@ -309,12 +311,47 @@ def has_external_reference(formula):
     if not formula: return False
     return "['" in formula or "!'" in formula
 
+_recent_log_signatures = {}
+
 def log_meaningful_changes_to_csv(file_path, worksheet_name, changes, current_author):
     """
     📝 記錄有意義的變更到 CSV (最終統一版)
+    - 增加過去一段時間內的去重：相同內容在 LOG_DEDUP_WINDOW_SEC 內不會重複記錄
     """
     if not current_author or current_author == 'N/A' or not changes:
         return
+
+    # 構建變更的穩定簽名（檔名+表名+變更內容）
+    try:
+        # 規範化 changes 項目（避免相同內容不同順序造成簽名不同）
+        def _norm(x):
+            return (
+                str(x.get('address','')),
+                str(x.get('change_type','')),
+                _json.dumps(x.get('old_value', ''), ensure_ascii=False, sort_keys=True),
+                _json.dumps(x.get('new_value', ''), ensure_ascii=False, sort_keys=True),
+                str(x.get('old_formula','')),
+                str(x.get('new_formula','')),
+            )
+        normalized_changes = sorted([_norm(c) for c in (changes or [])])
+        payload = {
+            'file': os.path.abspath(file_path),
+            'sheet': worksheet_name,
+            'changes': normalized_changes,
+        }
+        sig = hashlib.md5(_json.dumps(payload, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+        now = time.time()
+        window = float(getattr(settings, 'LOG_DEDUP_WINDOW_SEC', 300))
+        # 清理過期的簽名
+        for k in list(_recent_log_signatures.keys()):
+            if now - _recent_log_signatures[k] > window:
+                _recent_log_signatures.pop(k, None)
+        # 如果簽名仍在時間窗內，跳過記錄
+        if sig in _recent_log_signatures:
+            return
+        _recent_log_signatures[sig] = now
+    except Exception:
+        pass
 
     try:
         os.makedirs(os.path.dirname(settings.CSV_LOG_FILE), exist_ok=True)
@@ -347,7 +384,7 @@ def log_meaningful_changes_to_csv(file_path, worksheet_name, changes, current_au
         print(f"📝 {len(changes)} 項變更已記錄到 CSV")
         
     except (OSError, csv.Error) as e:
-        logging.error(f"記錄有意義的變-更到 CSV 時發生錯誤: {e}")
+        logging.error(f"記錄有意義的變更到 CSV 時發生錯誤: {e}")
 
 # 輔助函數
 def set_current_event_number(event_number):

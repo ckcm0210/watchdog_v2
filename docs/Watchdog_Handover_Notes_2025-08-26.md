@@ -1,5 +1,7 @@
 # Watchdog Handover Notes (2025-08-26)
 
+Note: See also Watchdog_Handover_Notes_2025-08-27.md for the latest handover with additional guidance on avoiding Excel file locks and detailed flow diagrams.
+
 Purpose: Persist the working context so we can resume quickly tomorrow.
 
 Summary of what changed today
