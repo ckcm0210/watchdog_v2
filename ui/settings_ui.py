@@ -282,6 +282,19 @@ PARAMS_SPEC = [
         'help': '比較結果輸出的壓縮 CSV 檔路徑，從 LOG_FOLDER + 日期組合而來。',
         'type': 'readonly',
     },
+    {
+        'key': 'CONSOLE_TEXT_LOG_ENABLED',
+        'label': '將 Console 輸出寫入文字檔',
+        'help': '將所有 Console 訊息（含表格）追加寫入指定的文字檔（UTF-8）。可用於長期留存或排查。',
+        'type': 'bool',
+    },
+    {
+        'key': 'CONSOLE_TEXT_LOG_FILE',
+        'label': 'Console 文字檔路徑',
+        'help': '預設為 LOG_FOLDER/console_log_YYYYMMDD.txt（依據日誌日期）。你亦可自訂儲存位置。',
+        'type': 'path',
+        'path_kind': 'save_file',
+    },
 
     # 快速模式
     {

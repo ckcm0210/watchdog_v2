@@ -41,6 +41,10 @@ Best practices to avoid file locks
 - All workbook reads use read_only mode and close resources immediately.
 - In STRICT_NO_ORIGINAL_READ mode, if copying ultimately fails, the file is skipped (original file is never opened).
 
+Console text log
+- You can choose to write only change-related messages to the text file (banners and comparison tables). In Settings UI, enable "將 Console 輸出寫入文字檔" and optionally enable "Console 文字檔僅記錄「變更」".
+- All console messages are appended to a UTF-8 text file when enabled. Configure path in "Console 文字檔路徑".
+
 Daily ops log
 - Copy failures are recorded to LOG_FOLDER/ops_log/copy_failures_YYYYMMDD.csv with timestamp, file path, error, attempts, and current strict/chunk/backoff settings.
 - Review daily to spot repeated failures (network issues, Excel save conflicts, or access problems).

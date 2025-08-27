@@ -75,6 +75,11 @@ MANUAL_BASELINE_TARGET = []
 LOG_FOLDER = r"C:\Users\user\Desktop\watchdog\log_folder"
 LOG_FILE_DATE = datetime.now().strftime('%Y%m%d')
 CSV_LOG_FILE = os.path.join(LOG_FOLDER, f"excel_change_log_{LOG_FILE_DATE}.csv.gz")
+# Console 純文字日誌
+CONSOLE_TEXT_LOG_ENABLED = True
+CONSOLE_TEXT_LOG_FILE = os.path.join(LOG_FOLDER, f"console_log_{LOG_FILE_DATE}.txt")
+# 只將「變更相關」訊息寫入文字檔（比較表格、變更橫幅）
+CONSOLE_TEXT_LOG_ONLY_CHANGES = True
 SUPPORTED_EXTS = ('.xlsx', '.xlsm')
 # 只監控變更但不預先建立 baseline 的資料夾（例如整個磁碟機根目錄）。
 # 在這些路徑內，首次偵測到變更會先記錄資訊並建立 baseline，之後才進入正常比較流程。
