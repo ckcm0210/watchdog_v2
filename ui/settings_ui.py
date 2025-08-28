@@ -379,6 +379,46 @@ PARAMS_SPEC = [
         'help': '最多等待多少秒來達到所需的穩定檢查次數；超時則本次複製跳過。',
         'type': 'text',
     },
+    # Phase 1 新增：快速跳過與鎖檔判斷
+    {
+        'key': 'QUICK_SKIP_BY_STAT',
+        'label': '快速跳過：mtime/size 未變時不讀取',
+        'help': '啟用後，若來源檔案的修改時間與大小與基準線一致（含容差），直接判定無變更，跳過複製與讀取內容。',
+        'type': 'bool',
+    },
+    {
+        'key': 'MTIME_TOLERANCE_SEC',
+        'label': 'mtime 容差（秒）',
+        'help': '快速跳過時允許的修改時間容差（秒，可輸入小數）。',
+        'type': 'text',
+    },
+    {
+        'key': 'SKIP_WHEN_TEMP_LOCK_PRESENT',
+        'label': '偵測暫存鎖檔 (~$) 時延後觸碰',
+        'help': '當偵測到 Office 暫存鎖檔（~$開頭）存在時，延後複製與比較以避開 Excel 保存尾段。',
+        'type': 'bool',
+    },
+    # Phase 2：複製引擎
+    {
+        'key': 'COPY_ENGINE',
+        'label': '複製引擎（Windows）',
+        'help': '選擇複製檔案所使用的引擎：python（內建）、powershell（Copy-Item）、robocopy（穩定、對網路良好）。',
+        'type': 'choice',
+        'choices': ['python','powershell','robocopy']
+    },
+    {
+        'key': 'PREFER_SUBPROCESS_FOR_XLSM',
+        'label': '對 .xlsm 一律使用子程序複製',
+        'help': '對含巨集的 .xlsm 檔案優先使用系統子程序（robocopy/PowerShell）複製，以降低鎖檔風險。',
+        'type': 'bool',
+    },
+    {
+        'key': 'SUBPROCESS_ENGINE_FOR_XLSM',
+        'label': '.xlsm 子程序複製引擎',
+        'help': '當啟用「對 .xlsm 一律使用子程序複製」時，選擇 robocopy 或 PowerShell 作為引擎。',
+        'type': 'choice',
+        'choices': ['robocopy','powershell']
+    },
 
     # 日誌／去重
     {
@@ -482,28 +522,17 @@ class SettingsDialog(tk.Toplevel):
         self._widgets: Dict[str, Any] = {}
         self.protocol('WM_DELETE_WINDOW', self._on_close)
 
-        # Load defaults (config + runtime overrides)
-        runtime_data = load_runtime_settings()
+        # Load defaults: apply last runtime into settings first, then read from settings only
+        try:
+            _rt = load_runtime_settings()
+            if _rt:
+                apply_to_settings(_rt)
+        except Exception:
+            pass
 
-        frm = ttk.Frame(self)
-        frm.pack(fill=tk.BOTH, expand=True)
-
-        canvas = tk.Canvas(frm)
-        # Enable mouse-wheel scroll on Windows
-        def _on_mousewheel(event):
-            # Standardize Windows wheel delta
-            delta = int(-1 * (event.delta / 120))
-            canvas.yview_scroll(delta, 'units')
-            return 'break'
-        canvas.bind_all('<MouseWheel>', _on_mousewheel)
-
-        scrollbar = ttk.Scrollbar(frm, orient='vertical', command=canvas.yview)
-        scroll_frame = ttk.Frame(canvas)
-        scroll_frame.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
-        canvas.create_window((0, 0), window=scroll_frame, anchor='nw')
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
+        # Tabs (Notebook)
+        nb = ttk.Notebook(self)
+        nb.pack(fill='both', expand=True)
 
         # Helper: treat empty strings/lists/dicts as blank, but keep 0/False
         def _is_blank(v):
@@ -515,135 +544,215 @@ class SettingsDialog(tk.Toplevel):
                 return True
             return False
 
-        specs = sorted(PARAMS_SPEC, key=lambda s: s.get('priority', 100))
-        for spec in specs:
-            row = ttk.Frame(scroll_frame)
-            row.pack(fill='x', padx=10, pady=6)
-            ttk.Label(row, text=spec['label']).pack(anchor='w')
-            help_lbl = ttk.Label(row, text=spec['help'], foreground='#666', wraplength=820, justify='left')
-            help_lbl.pack(anchor='w')
-            key = spec['key']
-            cur_val = getattr(settings, key, '')
-            if key in runtime_data and not _is_blank(runtime_data[key]):
-                cur_val = runtime_data[key]
-            w = None
-            if spec['type'] == 'text':
-                # Special display for SUPPORTED_EXTS: show as comma-separated string without parentheses
-                display_val = ''
-                if key == 'SUPPORTED_EXTS':
-                    if isinstance(cur_val, (list, tuple)):
-                        display_val = ','.join([str(x) for x in cur_val])
+        # Build a dict for quick lookup
+        _spec_by_key = {s['key']: s for s in PARAMS_SPEC}
+
+        # Define tabs and contained keys
+        TABS = [
+            ('監控範圍與啟動掃描', [
+                'WATCH_FOLDERS','WATCH_EXCLUDE_FOLDERS','MONITOR_ONLY_FOLDERS','MONITOR_ONLY_EXCLUDE_FOLDERS',
+                'SCAN_TARGET_FOLDERS','AUTO_SYNC_SCAN_TARGETS','SCAN_ALL_MODE','SUPPORTED_EXTS','MANUAL_BASELINE_TARGET'
+            ]),
+            ('輪巡與事件控制', [
+                'DEBOUNCE_INTERVAL_SEC','POLLING_SIZE_THRESHOLD_MB','DENSE_POLLING_INTERVAL_SEC','DENSE_POLLING_DURATION_SEC',
+                'SPARSE_POLLING_INTERVAL_SEC','SPARSE_POLLING_DURATION_SEC','QUICK_SKIP_BY_STAT','MTIME_TOLERANCE_SEC',
+                'SKIP_WHEN_TEMP_LOCK_PRESENT','POLLING_STABLE_CHECKS','POLLING_COOLDOWN_SEC'
+            ]),
+            ('複製與快取', [
+                'USE_LOCAL_CACHE','STRICT_NO_ORIGINAL_READ','CACHE_FOLDER','IGNORE_CACHE_FOLDER','COPY_RETRY_COUNT','COPY_RETRY_BACKOFF_SEC',
+                'COPY_CHUNK_SIZE_MB','COPY_STABILITY_CHECKS','COPY_STABILITY_INTERVAL_SEC','COPY_STABILITY_MAX_WAIT_SEC','COPY_POST_SLEEP_SEC',
+                'COPY_ENGINE','PREFER_SUBPROCESS_FOR_XLSM','SUBPROCESS_ENGINE_FOR_XLSM'
+            ]),
+            ('比較與變更檢測', [
+                'FORMULA_ONLY_MODE','TRACK_DIRECT_VALUE_CHANGES','TRACK_FORMULA_CHANGES','ENABLE_FORMULA_VALUE_CHECK','MAX_FORMULA_VALUE_CELLS',
+                'TRACK_EXTERNAL_REFERENCES','IGNORE_INDIRECT_CHANGES','MAX_CHANGES_TO_DISPLAY','AUTO_UPDATE_BASELINE_AFTER_COMPARE'
+            ]),
+            ('基準線與壓縮/歸檔', [
+                'DEFAULT_COMPRESSION_FORMAT','LZ4_COMPRESSION_LEVEL','ZSTD_COMPRESSION_LEVEL','GZIP_COMPRESSION_LEVEL',
+                'ENABLE_ARCHIVE_MODE','ARCHIVE_AFTER_DAYS','ARCHIVE_COMPRESSION_FORMAT','SHOW_COMPRESSION_STATS'
+            ]),
+            ('日誌與輸出', [
+                'LOG_FOLDER','LOG_FILE_DATE','CSV_LOG_FILE','CONSOLE_TEXT_LOG_ENABLED','CONSOLE_TEXT_LOG_FILE','LOG_DEDUP_WINDOW_SEC',
+                'ENABLE_OPS_LOG','IGNORE_LOG_FOLDER'
+            ]),
+            ('Console 與 UI', [
+                'ENABLE_BLACK_CONSOLE','CONSOLE_POPUP_ON_COMPARISON','CONSOLE_ALWAYS_ON_TOP','CONSOLE_TEMP_TOPMOST_DURATION','CONSOLE_INITIAL_TOPMOST_DURATION'
+            ]),
+            ('可靠性與資源', [
+                'ENABLE_TIMEOUT','FILE_TIMEOUT_SECONDS','ENABLE_MEMORY_MONITOR','MEMORY_LIMIT_MB','ENABLE_RESUME','RESUME_LOG_FILE',
+                'MAX_RETRY','RETRY_INTERVAL_SEC','WHITELIST_USERS','LOG_WHITELIST_USER_CHANGE','FORCE_BASELINE_ON_FIRST_SEEN','SHOW_DEBUG_MESSAGES'
+            ]),
+        ]
+
+        # Helper to create a scrollable frame
+        def make_scrollable(parent):
+            frm = ttk.Frame(parent)
+            canvas = tk.Canvas(frm)
+            vbar = ttk.Scrollbar(frm, orient='vertical', command=canvas.yview)
+            inner = ttk.Frame(canvas)
+            inner.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+            canvas.create_window((0, 0), window=inner, anchor='nw')
+            canvas.configure(yscrollcommand=vbar.set)
+            canvas.pack(side='left', fill='both', expand=True)
+            vbar.pack(side='right', fill='y')
+            # mouse wheel
+            def _on_mousewheel(event):
+                delta = int(-1 * (event.delta / 120))
+                canvas.yview_scroll(delta, 'units')
+                return 'break'
+            canvas.bind_all('<MouseWheel>', _on_mousewheel)
+            return frm, inner
+
+        # Render controls into tabs
+        for tab_title, keys in TABS:
+            tab = ttk.Frame(nb)
+            nb.add(tab, text=tab_title)
+            frame, holder = make_scrollable(tab)
+            frame.pack(fill='both', expand=True)
+            for k in keys:
+                if k not in _spec_by_key:
+                    continue
+                spec = _spec_by_key[k]
+                row = ttk.Frame(holder)
+                row.pack(fill='x', padx=10, pady=6)
+                ttk.Label(row, text=spec['label']).pack(anchor='w')
+                help_lbl = ttk.Label(row, text=spec['help'], foreground='#666', wraplength=820, justify='left')
+                help_lbl.pack(anchor='w')
+                key = spec['key']
+                cur_val = getattr(settings, key, '')
+                w = None
+                if spec['type'] == 'text':
+                    display_val = ''
+                    if key == 'SUPPORTED_EXTS':
+                        if isinstance(cur_val, (list, tuple)):
+                            display_val = ','.join([str(x) for x in cur_val])
+                        else:
+                            display_val = str(cur_val)
                     else:
                         display_val = str(cur_val)
-                else:
-                    display_val = str(cur_val)
-                var = tk.StringVar(value=display_val)
-                w = ttk.Entry(row, textvariable=var, width=80)
-                w.pack(anchor='w', fill='x')
-            elif spec['type'] == 'multiline':
-                text = tk.Text(row, height=4, width=80)
-                if isinstance(cur_val, (list, tuple)):
-                    text.insert('1.0', '\n'.join(cur_val))
-                else:
-                    text.insert('1.0', str(cur_val))
-                text.pack(anchor='w', fill='x')
-                w = text
-            elif spec['type'] == 'watch_subselect':
-                # Checkbox list built from WATCH_FOLDERS (subset selection)
-                frame = ttk.Frame(row)
-                frame.pack(anchor='w', fill='x')
-                vars_list = []
-                rt = runtime.load_runtime_settings()
-                watch_list = rt.get('WATCH_FOLDERS') if rt.get('WATCH_FOLDERS') else getattr(settings, 'WATCH_FOLDERS', [])
-                cur_selected = set(cur_val or [])
-                if not cur_selected:
-                    cur_selected = set(watch_list)
-                for path in watch_list:
-                    var = tk.BooleanVar(value=(path in cur_selected))
-                    cb = ttk.Checkbutton(frame, text=os.path.normpath(path), variable=var)
-                    cb.pack(anchor='w')
-                    vars_list.append((path, var))
-                def sync_from_watch():
-                    nonlocal vars_list
-                    for child in frame.winfo_children():
-                        child.destroy()
+                    var = tk.StringVar(value=display_val)
+                    w = ttk.Entry(row, textvariable=var, width=80)
+                    w.pack(anchor='w', fill='x')
+                elif spec['type'] == 'multiline':
+                    text = tk.Text(row, height=4, width=80)
+                    if isinstance(cur_val, (list, tuple)):
+                        text.insert('1.0', '\n'.join(cur_val))
+                    else:
+                        text.insert('1.0', str(cur_val))
+                    text.pack(anchor='w', fill='x')
+                    w = text
+                elif spec['type'] == 'watch_subselect':
+                    frame2 = ttk.Frame(row)
+                    frame2.pack(anchor='w', fill='x')
                     vars_list = []
-                    rt2 = runtime.load_runtime_settings()
-                    watch_list2 = rt2.get('WATCH_FOLDERS') if rt2.get('WATCH_FOLDERS') else getattr(settings, 'WATCH_FOLDERS', [])
-                    for path in watch_list2:
-                        var = tk.BooleanVar(value=True)
-                        cb = ttk.Checkbutton(frame, text=os.path.normpath(path), variable=var)
+                    rt = runtime.load_runtime_settings()
+                    watch_list = rt.get('WATCH_FOLDERS') if rt.get('WATCH_FOLDERS') else getattr(settings, 'WATCH_FOLDERS', [])
+                    cur_selected = set(cur_val or [])
+                    if not cur_selected:
+                        cur_selected = set(watch_list)
+                    for path in watch_list:
+                        var = tk.BooleanVar(value=(path in cur_selected))
+                        cb = ttk.Checkbutton(frame2, text=os.path.normpath(path), variable=var)
                         cb.pack(anchor='w')
                         vars_list.append((path, var))
-                ttk.Button(row, text='從監控資料夾同步', command=sync_from_watch).pack(anchor='w', pady=4)
-                frame.vars_list = vars_list
-                w = frame
-            elif spec['type'] == 'paths':
-                # Multi-select paths: provide listbox + add/remove buttons
-                frame = ttk.Frame(row)
-                frame.pack(anchor='w', fill='x')
-                listbox = tk.Listbox(frame, height=5, width=80, selectmode=tk.EXTENDED)
-                listbox.pack(side='left', fill='both', expand=True)
-                for v in (cur_val or []):
-                    try:
-                        listbox.insert('end', os.path.normpath(v))
-                    except Exception:
-                        listbox.insert('end', str(v))
-                btns = ttk.Frame(frame)
-                btns.pack(side='left', padx=6)
-                def add_path(lb=listbox, sp=spec):
-                    if sp.get('path_kind') == 'file':
-                        p = filedialog.askopenfilename()
-                    else:
-                        p = filedialog.askdirectory()
-                    if p:
-                        # Normalize to Windows-style backslashes
-                        p = os.path.normpath(p)
-                        lb.insert('end', p)
-                def remove_selected(lb=listbox):
-                    sel = list(lb.curselection())
-                    sel.reverse()
-                    for idx in sel:
-                        lb.delete(idx)
-                def clear_all(lb=listbox):
-                    lb.delete(0, 'end')
-                ttk.Button(btns, text='新增', command=add_path).pack(fill='x')
-                ttk.Button(btns, text='移除選取', command=remove_selected).pack(fill='x', pady=2)
-                ttk.Button(btns, text='全部清除', command=clear_all).pack(fill='x')
-                w = listbox
-            elif spec['type'] == 'path':
-                # Single path with browse button
-                frame = ttk.Frame(row)
-                frame.pack(anchor='w', fill='x')
-                var = tk.StringVar(value=str(cur_val))
-                entry = ttk.Entry(frame, textvariable=var, width=70)
-                entry.pack(side='left', fill='x', expand=True)
-                def browse():
-                    kind = spec.get('path_kind')
-                    if kind == 'file':
-                        p = filedialog.askopenfilename()
-                    elif kind == 'save_file':
-                        p = filedialog.asksaveasfilename()
-                    else:
-                        p = filedialog.askdirectory()
-                    if p:
-                        var.set(os.path.normpath(p))
-                ttk.Button(frame, text='瀏覽...', command=browse).pack(side='left', padx=6)
-                w = entry
-            elif spec['type'] == 'bool':
-                var = tk.BooleanVar(value=bool(cur_val))
-                w = ttk.Checkbutton(row, variable=var, text='啟用/勾選')
-                w.var = var
-                w.pack(anchor='w')
-            elif spec['type'] == 'int':
-                var = tk.StringVar(value=str(cur_val))
-                w = ttk.Entry(row, textvariable=var, width=20)
-                w.pack(anchor='w')
-            elif spec['type'] == 'choice':
-                var = tk.StringVar(value=str(cur_val))
-                w = ttk.Combobox(row, textvariable=var, values=spec['choices'], state='readonly', width=20)
-                w.pack(anchor='w')
-            self._widgets[key] = (spec, w)
+                    def sync_from_watch():
+                        nonlocal vars_list
+                        for child in frame2.winfo_children():
+                            child.destroy()
+                        vars_list = []
+                        rt2 = runtime.load_runtime_settings()
+                        watch_list2 = rt2.get('WATCH_FOLDERS') if rt2.get('WATCH_FOLDERS') else getattr(settings, 'WATCH_FOLDERS', [])
+                        for path in watch_list2:
+                            var = tk.BooleanVar(value=True)
+                            cb = ttk.Checkbutton(frame2, text=os.path.normpath(path), variable=var)
+                            cb.pack(anchor='w')
+                            vars_list.append((path, var))
+                    ttk.Button(row, text='從監控資料夾同步', command=sync_from_watch).pack(anchor='w', pady=4)
+                    frame2.vars_list = vars_list
+                    w = frame2
+                elif spec['type'] == 'paths':
+                    frame2 = ttk.Frame(row)
+                    frame2.pack(anchor='w', fill='x')
+                    listbox = tk.Listbox(frame2, height=5, width=80, selectmode=tk.EXTENDED)
+                    listbox.pack(side='left', fill='both', expand=True)
+                    for v in (cur_val or []):
+                        try:
+                            listbox.insert('end', os.path.normpath(v))
+                        except Exception:
+                            listbox.insert('end', str(v))
+                    btns = ttk.Frame(frame2)
+                    btns.pack(side='left', padx=6)
+                    def _live_sync_scan_targets():
+                        try:
+                            auto_spec, auto_widget = self._widgets.get('AUTO_SYNC_SCAN_TARGETS', (None, None))
+                            auto_on = bool(auto_widget.var.get()) if auto_widget and hasattr(auto_widget, 'var') else False
+                            if not auto_on:
+                                return
+                            if key != 'WATCH_FOLDERS':
+                                return
+                            tgt_spec, tgt_widget = self._widgets.get('SCAN_TARGET_FOLDERS', (None, None))
+                            if not tgt_widget:
+                                return
+                            items = list(listbox.get(0, 'end'))
+                            tgt_widget.delete(0, 'end')
+                            for it in items:
+                                tgt_widget.insert('end', it)
+                        except Exception:
+                            pass
+                    def add_path(lb=listbox, sp=spec):
+                        if sp.get('path_kind') == 'file':
+                            p = filedialog.askopenfilename()
+                        else:
+                            p = filedialog.askdirectory()
+                        if p:
+                            p = os.path.normpath(p)
+                            lb.insert('end', p)
+                            _live_sync_scan_targets()
+                    def remove_selected(lb=listbox):
+                        sel = list(lb.curselection())
+                        sel.reverse()
+                        for idx in sel:
+                            lb.delete(idx)
+                        _live_sync_scan_targets()
+                    def clear_all(lb=listbox):
+                        lb.delete(0, 'end')
+                        _live_sync_scan_targets()
+                    ttk.Button(btns, text='新增', command=add_path).pack(fill='x')
+                    ttk.Button(btns, text='移除選取', command=remove_selected).pack(fill='x', pady=2)
+                    ttk.Button(btns, text='全部清除', command=clear_all).pack(fill='x')
+                    w = listbox
+                elif spec['type'] == 'path':
+                    frame2 = ttk.Frame(row)
+                    frame2.pack(anchor='w', fill='x')
+                    var = tk.StringVar(value=str(cur_val))
+                    entry = ttk.Entry(frame2, textvariable=var, width=70)
+                    entry.pack(side='left', fill='x', expand=True)
+                    def browse():
+                        kind = spec.get('path_kind')
+                        if kind == 'file':
+                            p = filedialog.askopenfilename()
+                        elif kind == 'save_file':
+                            p = filedialog.asksaveasfilename()
+                        else:
+                            p = filedialog.askdirectory()
+                        if p:
+                            var.set(os.path.normpath(p))
+                    ttk.Button(frame2, text='瀏覽...', command=browse).pack(side='left', padx=6)
+                    w = entry
+                elif spec['type'] == 'bool':
+                    var = tk.BooleanVar(value=bool(cur_val))
+                    w = ttk.Checkbutton(row, variable=var, text='啟用/勾選')
+                    w.var = var
+                    w.pack(anchor='w')
+                elif spec['type'] == 'int':
+                    var = tk.StringVar(value=str(cur_val))
+                    w = ttk.Entry(row, textvariable=var, width=20)
+                    w.pack(anchor='w')
+                elif spec['type'] == 'choice':
+                    var = tk.StringVar(value=str(cur_val))
+                    w = ttk.Combobox(row, textvariable=var, values=spec['choices'], state='readonly', width=20)
+                    w.pack(anchor='w')
+                self._widgets[key] = (spec, w)
 
         # 保證空白欄位會自動填入 settings.py 的預設值
         self._ensure_defaults_filled()
@@ -782,13 +891,24 @@ class SettingsDialog(tk.Toplevel):
 
     def _save_and_apply(self):
         try:
-            data = self._collect_values()
+            new_data = self._collect_values()
+            # 合併保存：以畫面值覆蓋 runtime JSON，空值不覆蓋
+            def _is_blank(v):
+                if v is None: return True
+                if isinstance(v, str) and v.strip() == '': return True
+                if isinstance(v, (list, tuple, dict)) and len(v) == 0: return True
+                return False
+            old_data = load_runtime_settings() or {}
+            merged = dict(old_data)
+            for k, v in (new_data or {}).items():
+                if _is_blank(v):
+                    continue
+                merged[k] = v
             # 按下儲存並開始：確保移除取消旗標
-            if 'STARTUP_CANCELLED' in data:
-                data.pop('STARTUP_CANCELLED', None)
-            # persist and apply
-            save_runtime_settings(data)
-            apply_to_settings(data)
+            if 'STARTUP_CANCELLED' in merged:
+                merged.pop('STARTUP_CANCELLED', None)
+            save_runtime_settings(merged)
+            apply_to_settings(merged)
             self.destroy()
         except Exception as e:
             messagebox.showerror('錯誤', f'儲存設定失敗: {e}')

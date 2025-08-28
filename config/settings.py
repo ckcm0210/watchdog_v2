@@ -31,24 +31,34 @@ CACHE_FOLDER = r"C:\Users\user\Desktop\watchdog\cache_folder"
 # 嚴格模式：永不開原檔（copy 失敗則跳過處理）
 STRICT_NO_ORIGINAL_READ = True
 # 複製重試次數與退避（秒）
-COPY_RETRY_COUNT = 8
+COPY_RETRY_COUNT = 10
 COPY_RETRY_BACKOFF_SEC = 1.0
 # （可選）分塊複製的塊大小（MB），0 表示不用分塊特別處理
 COPY_CHUNK_SIZE_MB = 4
 # 複製完成後的短暫等待（秒），給檔案系統穩定
 COPY_POST_SLEEP_SEC = 0.2
 # 複製前穩定性預檢：連續 N 次 mtime 不變才開始複製
-COPY_STABILITY_CHECKS = 2
+COPY_STABILITY_CHECKS = 5
 COPY_STABILITY_INTERVAL_SEC = 1.0
-COPY_STABILITY_MAX_WAIT_SEC = 3.0
+COPY_STABILITY_MAX_WAIT_SEC = 12.0
 ENABLE_FAST_MODE = True
+# Phase 1 new controls
+QUICK_SKIP_BY_STAT = True           # 若 mtime/size 與基準線一致則直接跳過讀取
+MTIME_TOLERANCE_SEC = 2.0           # mtime 容差（秒）
+POLLING_STABLE_CHECKS = 3           # 輪巡：連續多少次「無變化」才算穩定
+POLLING_COOLDOWN_SEC = 20           # 每檔案成功比較後的冷靜期（秒）
+SKIP_WHEN_TEMP_LOCK_PRESENT = True  # 偵測到 ~$ 鎖檔時延後觸碰
+# Phase 2: 複製引擎選擇
+COPY_ENGINE = 'python'              # 'python' | 'powershell' | 'robocopy'
+PREFER_SUBPROCESS_FOR_XLSM = True   # 對 .xlsm 檔優先使用子程序複製
+SUBPROCESS_ENGINE_FOR_XLSM = 'robocopy'  # 'powershell' | 'robocopy'
 ENABLE_TIMEOUT = True
 FILE_TIMEOUT_SECONDS = 120
 ENABLE_MEMORY_MONITOR = True
 MEMORY_LIMIT_MB = 2048
 ENABLE_RESUME = True
 FORMULA_ONLY_MODE = True
-DEBOUNCE_INTERVAL_SEC = 2
+DEBOUNCE_INTERVAL_SEC = 4
 
 # =========== Compression Config ============
 # 預設壓縮格式：'lz4' 用於頻繁讀寫, 'zstd' 用於長期存儲, 'gzip' 用於兼容性
@@ -90,6 +100,8 @@ WATCH_EXCLUDE_FOLDERS = []
 MONITOR_ONLY_EXCLUDE_FOLDERS = []
 # 忽略 CACHE_FOLDER 下的所有事件
 IGNORE_CACHE_FOLDER = True
+IGNORE_LOG_FOLDER = True            # 忽略 LOG_FOLDER 內的所有事件（避免自我觸發）
+ENABLE_OPS_LOG = True               # 啟用 ops 複製成功/失敗 CSV 記錄
 MAX_RETRY = 10
 RETRY_INTERVAL_SEC = 2
 USE_TEMP_COPY = True
@@ -106,7 +118,7 @@ FORCE_BASELINE_ON_FIRST_SEEN = [
 POLLING_SIZE_THRESHOLD_MB = 10
 DENSE_POLLING_INTERVAL_SEC = 10
 DENSE_POLLING_DURATION_SEC = 15
-SPARSE_POLLING_INTERVAL_SEC = 15
+SPARSE_POLLING_INTERVAL_SEC = 60
 SPARSE_POLLING_DURATION_SEC = 15
 
 # =========== 全局變數 ============

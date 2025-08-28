@@ -165,6 +165,20 @@ def compare_excel_changes(file_path, silent=False, event_number=None, is_polling
         base_key = _baseline_key_for_path(file_path)
         
         old_baseline = load_baseline(base_key)
+        # 快速跳過：若與基準線的 mtime/size 一致（容差內），直接判定無變化
+        if settings.QUICK_SKIP_BY_STAT and old_baseline and \
+           ("source_mtime" in old_baseline) and ("source_size" in old_baseline):
+            try:
+                cur_mtime = os.path.getmtime(file_path)
+                cur_size  = os.path.getsize(file_path)
+                base_mtime = float(old_baseline.get("source_mtime", 0))
+                base_size  = int(old_baseline.get("source_size", -1))
+                if (cur_size == base_size) and (abs(cur_mtime - base_mtime) <= float(getattr(settings,'MTIME_TOLERANCE_SEC',2.0))):
+                    if not silent:
+                        print(f"[快速通過] {os.path.basename(file_path)} mtime/size 未變，略過讀取。")
+                    return False
+            except Exception:
+                pass
         if old_baseline is None:
             old_baseline = {}
 
@@ -239,11 +253,15 @@ def compare_excel_changes(file_path, silent=False, event_number=None, is_polling
         if any_sheet_has_changes and not silent:
             if settings.AUTO_UPDATE_BASELINE_AFTER_COMPARE:
                 print(f"🔄 自動更新基準線: {os.path.basename(file_path)}")
+                cur_mtime = os.path.getmtime(file_path)
+                cur_size  = os.path.getsize(file_path)
                 updated_baseline = {
                     "last_author": new_author,
                     "content_hash": f"updated_{int(time.time())}",
                     "cells": current_data,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
+                     "source_mtime": cur_mtime,
+                     "source_size": cur_size
                 }
                 from core.baseline import save_baseline
                 if not save_baseline(base_key, updated_baseline):

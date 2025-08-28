@@ -70,6 +70,82 @@
 
 好，我哋用現有檢索到的代碼片段，集中喺 core 同 utils 做逐行級分析，標出會影響「鎖檔／Save 失敗」的關鍵觸點。注意：以下代碼摘錄源自快速檢索，可能不完整；建議用 GitHub 介面瀏覽全部內容以交叉核對：
 
+## 10) 用家補充與回應（2025-08-28）
+
+A. 只係 copy 先會接觸到原檔？
+- 對。現時設計入面，唯一會直接打開「原始 Excel 檔」嘅步驟，就係 utils/cache.py 的 copy_to_cache（用 open/shutil.copy2 或分塊讀）。之後所有重讀都係針對「快取檔」做（openpyxl、zipfile），唔會再摸原檔。
+
+B. 「copy 完之後仍然鎖住檔案」點解會發生？
+- 我方程式碼喺複製階段用 with 開檔，理論上複製完成即釋放把手，並有短暫 sleep（COPY_POST_SLEEP_SEC）。但仍可能出現以下情況：
+  1) 正撞正 Excel 安全儲存最後階段（覆蓋/rename/flush），SMB/oplock/AV filter 有延遲釋放或重試機制，導致使用者感覺「copy 完仍然被鎖」。
+  2) 同期第三方（防毒、同步客戶端、索引器）因為我方複製行為而跟入掃描，握住把手未放。
+  3) 我方輪巡期內再次嘗試 copy，對原檔造成連續讀取壓力（見下一節）。
+
+C. 最後一道屏障（Last resort）— 如何「確保 copy 完一定唔會再鎖住原檔」？
+- 可行做法（由低風險到高改動）：
+  1) 加長並嚴格化「穩定窗口」：
+     - 在 copy 前要求 mtime/size 連續 N 次（例如 N=5，間隔 1.0–1.5s）完全不變，且若偵測到暫存鎖檔（~$xxx.xlsx）存在則延長等待。
+  2) copy 後的清理儀式：
+     - 以 with 確保 close；顯式 del 變數、gc.collect()；保留 200–500ms sleep（已有 COPY_POST_SLEEP_SEC）。
+  3) 冷靜期（cooldown）：
+     - 在同一檔案成功複製後，設定至少 8–15 秒的 per-file cooldown；冷靜期內即使 mtime 輕微波動都唔再觸發新一次 copy。
+  4) 「穩定窗口先比較」策略（建議實作）：
+     - 輪巡時唔係見到 mtime 就即刻比較，而係要連續 T 秒或連續 N 次檢查「完全無變」先執行 copy/compare，明顯降低與 Excel 最後保存階段的碰撞。
+  5) 子程序複製（可選）：
+     - 提供一個選項用 Windows 原生 robocopy/Copy-Item（子進程）做複製；子進程結束即代表所有把手已釋放，可作為極端環境的後備策略（代價：需依賴系統工具）。
+  6) 明確拒絕「回退直讀原檔」：
+     - 保持 STRICT_NO_ORIGINAL_READ=True（現已如此）。若複製失敗就跳過，永不在原檔上用 openpyxl 讀。
+
+D. 「如果 copy 期間啱啱撞正 user save 檔案會出事」是否正確？
+- 可以咁理解：在 Windows/SMB/AV filter 環境，Excel 安全儲存係多步驟操作。當我方喺最後幾秒反覆打開來源檔進行 copy，就容易產生共享衝突或延遲釋放，把手錯覺為被鎖。透過上面 C(1)(4) 對應策略可大幅減少碰撞概率。
+
+E. 什麼叫「輪巡期內過於頻繁嘗試複製」？（解釋）
+- 目前輪巡邏輯（core/watcher.py::ActivePollingHandler._poll_for_stability）係：
+  - 只要偵測到 mtime 變咗，就即刻走一次 compare。compare 又會觸發 copy_to_cache → 讀原檔。
+  - 如果使用者連續幾次快速 Save，或者 Excel 在最後階段仍多次更新 mtime，就會形成「幾十秒內多次嘗試 copy」的情況。
+  - 這種高頻觸碰會放大與 Excel/SMB/AV 的共享爭用機率，亦可能造成使用者 Save 失敗或需重啟先恢復。
+- 改善：改為「穩定窗口先比較」：近期內 mtime 有變只記錄最後一次時間戳，等到連續 N 次檢查（或 T 秒）都無變先做第一次比較/複製。
+
+F. 建議把這些策略落實到設定/代碼
+- 設定層（即刻可調）：
+  - COPY_STABILITY_CHECKS=5、COPY_STABILITY_INTERVAL_SEC=1.0–1.5、COPY_STABILITY_MAX_WAIT_SEC=10–15
+  - COPY_RETRY_COUNT=8–10、COPY_RETRY_BACKOFF_SEC=1.0–2.0、COPY_CHUNK_SIZE_MB=4
+  - SPARSE_POLLING_INTERVAL_SEC=60、DEBOUNCE_INTERVAL_SEC=3–5
+  - 保持 STRICT_NO_ORIGINAL_READ=True、IGNORE_CACHE_FOLDER=True
+- 代碼層（短期）：
+  - 在 copy 成功亦寫入 ops CSV（目前只記錄失敗），方便對齊 Save 失敗時段分析。
+  - watcher 改成「穩定窗口先比較」；對偵測到 ~$ 文件存在時延長窗口；複製成功後加入 per-file 冷靜期。
+- 代碼層（可選）：
+  - 子程序複製選項（robocopy / Copy-Item / xcopy），作為極端環境的後備路徑，確保子進程退出即不留把手。
+
+## 11) 點解「copy 完仍然鎖住，要 reboot 先復原」？（深入解釋）
+- 正常情況：我方複製步驟用 with 開檔，複製完成即釋放把手；理論上 Excel 應可繼續 Save。
+- 實務上仍可能被鎖的原因：
+  1) 第三方模組延遲掃描：防毒/EDR、OneDrive/SharePoint 同步客戶端、Windows Search 索引器，見到我方剛讀過原檔就跟進掃描，短時間握住把手。
+  2) SMB/網絡 leasing/oplock 狀態：頻繁的打開/關閉會令 client/server 之間的租約/鎖狀態切換，偶發殘留（stale handle），需要等超時或重連才完全釋放。
+  3) Excel 安全儲存尾段多步驟：臨時檔寫入→覆蓋/rename→寫入屬性/metadata。呢段時間 mtime/size 會多次跳動，若我方輪巡「見動就 copy」，會在尾段反覆觸碰來源檔，放大爭用。
+  4) 我方 timer/thread 未完全停止（極少見）：若程式非優雅關閉，殘留計時器仍可能觸發 copy_to_cache（現版本已有 stop/cancel 保護）。
+- 點解 reboot 有效：重啟會重置進程、檔案系統快取、SMB 連線、oplock/leasing 狀態、以及第三方 filter driver 內部佇列；所有把手被強制清走，Excel 自然可正常 Save。
+- 回答你的直覺問題：「copy 完咗，點解仲鎖？」：因為「鎖」唔一定係我方程式；更多時候係被我方行為觸發咗其他系統/第三方模組去掃描，佢哋握住把手。避免方法係減少尾段高頻觸碰，並在 copy 後給足夠冷靜期讓其他模組自然釋放。
+
+## 12) 「軟重啟」級對策（不重啟電腦，但盡量達到同等效果）
+- 在應用層可即刻做：
+  - 穩定窗口先比較：輪巡期只在連續 N 次或 T 秒完全穩定先觸發首次 copy/compare，避開 Excel Save 尾段。
+  - per-file 冷靜期：每次成功複製之後，對該檔案強制 15–30 秒冷靜期；期間即使 mtime 微動都唔再觸發 copy。
+  - 嚴格模式：保持 STRICT_NO_ORIGINAL_READ=True；複製失敗就 skip，永不直讀原檔。
+  - 偵測 ~$.xls*：如見到 Office 暫存鎖檔，延長所有等待時間，暫不觸碰原檔。
+  - 清理儀式：copy 後顯式關閉/刪除檔案物件、gc.collect()，並保留少量 sleep（COPY_POST_SLEEP_SEC）。
+  - 子程序複製（可選）：改用 robocopy/Copy-Item 作為子進程，子進程退出即代表系統層把手已收回（在某些環境比 Python open 更少干擾）。
+  - 觀察與退避：若短時間內多次 copy 失敗或比較連續觸發，將該檔案退避到 1–5 分鐘再試。
+- 在監控層可做：
+  - 提供「暫停監控此檔/此目錄 X 分鐘」功能，等候外部模組自然釋放。
+  - 停止前確保 observer/timer 全部 cancel + join，避免殘留 thread。
+- 進階（Windows 專用，可選）：
+  - 若允許依賴 pywin32，可用 CreateFile 設定更寬鬆的共享旗標（FILE_SHARE_READ|WRITE|DELETE）讀取，以減少與 Excel 的共享衝突（需充分測試）。
+- 系統/IT 協作：
+  - 用 Handle/Process Explorer 確認握把手的進程（Excel/AV/同步客戶端等），必要時暫停對該路徑的即時掃描或同步。
+  - 重置 SMB 連線（例如 net use \\server\share /delete），或暫停/重啟 OneDrive/Office Upload Center。
+
 core 目錄搜索結果：https://github.com/ckcm0210/watchdog_v2/search?q=path%3A%5Ecore%5C%2F.*%24
 utils 目錄搜索結果：https://github.com/ckcm0210/watchdog_v2/search?q=path%3A%5Eutils%5C%2F.*%24
 一、事件入口與輪巡（core/watcher.py）

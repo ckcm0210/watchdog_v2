@@ -9,6 +9,17 @@ from datetime import datetime
 
 class ActivePollingHandler:
     """
+    主動輪詢處理器，採用新的智慧輪詢邏輯 + 穩定窗口/冷靜期
+    """
+    def __init__(self):
+        self.polling_tasks = {}
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        # Phase 1: 狀態表（每檔案）
+        # { file_path: {"last_mtime":float, "last_size":int, "stable":int, "cooldown_until":float} }
+        self.state = {}
+
+    """
     主動輪詢處理器，採用新的智慧輪詢邏輯
     """
     def __init__(self):
@@ -17,6 +28,32 @@ class ActivePollingHandler:
         self.stop_event = threading.Event()
 
     def start_polling(self, file_path, event_number):
+        """
+        根據檔案大小決定輪詢策略（用 mtime/size 穩定檢查，不再用與 baseline 的差異判斷）
+        """
+        try:
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            logging.warning(f"獲取檔案大小失敗: {file_path}, 錯誤: {e}")
+            file_size_mb = 0
+
+        interval = settings.DENSE_POLLING_INTERVAL_SEC if file_size_mb < settings.POLLING_SIZE_THRESHOLD_MB else settings.SPARSE_POLLING_INTERVAL_SEC
+        polling_type = "密集" if file_size_mb < settings.POLLING_SIZE_THRESHOLD_MB else "稀疏"
+        
+        print(f"[輪詢] 檔案: {os.path.basename(file_path)} ({polling_type}輪詢，每 {interval}s 檢查一次)")
+        # 初始化 last_mtime/size 與狀態
+        try:
+            last_mtime = os.path.getmtime(file_path)
+        except Exception:
+            last_mtime = 0
+        try:
+            last_size = os.path.getsize(file_path)
+        except Exception:
+            last_size = -1
+        with self.lock:
+            self.state[file_path] = {"last_mtime": last_mtime, "last_size": last_size, "stable": 0, "cooldown_until": 0.0}
+        self._start_adaptive_polling(file_path, event_number, interval, last_mtime)
+
         """
         根據檔案大小決定輪詢策略（用 mtime 穩定檢查，不再用與 baseline 的差異判斷）
         """
@@ -54,6 +91,97 @@ class ActivePollingHandler:
             print(f"    [輪詢啟動] {interval} 秒後首次檢查 {os.path.basename(file_path)}")
 
     def _poll_for_stability(self, file_path, event_number, interval, last_mtime):
+        """
+        執行輪詢檢查：使用 mtime/size 的穩定窗口策略，並包含冷靜期與暫存鎖檔判斷
+        """
+        if self.stop_event.is_set():
+            return
+
+        # 冷靜期判斷
+        st = self.state.get(file_path, {})
+        now = time.time()
+        if st and now < st.get("cooldown_until", 0):
+            print(f"    [cooldown] {os.path.basename(file_path)} 尚在冷靜期，略過本次。")
+            # 重新排程
+            with self.lock:
+                if file_path in self.polling_tasks:
+                    new_timer = threading.Timer(interval, lambda: self._poll_for_stability(file_path, event_number, interval, last_mtime))
+                    self.polling_tasks[file_path]['timer'] = new_timer
+                    new_timer.start()
+            return
+
+        # 檢測暫存鎖檔 (~$)
+        if getattr(settings, 'SKIP_WHEN_TEMP_LOCK_PRESENT', True):
+            tmp_lock = os.path.join(os.path.dirname(file_path), "~$" + os.path.basename(file_path))
+            try:
+                if os.path.exists(tmp_lock):
+                    print(f"    [鎖檔] 偵測到 {os.path.basename(tmp_lock)}，延後檢查。")
+                    with self.lock:
+                        if file_path in self.polling_tasks:
+                            new_timer = threading.Timer(interval, lambda: self._poll_for_stability(file_path, event_number, interval, last_mtime))
+                            self.polling_tasks[file_path]['timer'] = new_timer
+                            new_timer.start()
+                    return
+            except Exception:
+                pass
+
+        print(f"    [輪詢檢查] 正在檢查 {os.path.basename(file_path)} 的變更...")
+
+        # 以 mtime/size 穩定判斷
+        try:
+            cur_mtime = os.path.getmtime(file_path)
+        except Exception:
+            cur_mtime = last_mtime
+        try:
+            cur_size = os.path.getsize(file_path)
+        except Exception:
+            cur_size = self.state.get(file_path, {}).get('last_size', -1)
+
+        changed = False
+        st = self.state.get(file_path, {})
+        if st:
+            if cur_mtime != st.get('last_mtime') or cur_size != st.get('last_size'):
+                changed = True
+                st['last_mtime'] = cur_mtime
+                st['last_size'] = cur_size
+                st['stable'] = 0
+                print(f"    [輪詢] 檢測到變動，等待穩定窗口（{getattr(settings,'POLLING_STABLE_CHECKS',3)} 次）…")
+            else:
+                st['stable'] = st.get('stable', 0) + 1
+        
+        has_changes = False
+        if st and st.get('stable', 0) >= getattr(settings, 'POLLING_STABLE_CHECKS', 3):
+            from core.comparison import compare_excel_changes, set_current_event_number
+            set_current_event_number(event_number)
+            print(f"    [輪詢] 已穩定，開始比較…")
+            has_changes = compare_excel_changes(file_path, silent=False, event_number=event_number, is_polling=True)
+
+        with self.lock:
+            if file_path not in self.polling_tasks:
+                return
+
+            if has_changes:
+                print(f"    [輪詢] 變更仍持續，啟動冷靜期，{getattr(settings,'POLLING_COOLDOWN_SEC',20)} 秒後再次檢查。")
+                st['cooldown_until'] = time.time() + float(getattr(settings, 'POLLING_COOLDOWN_SEC', 20))
+                st['stable'] = 0
+                new_timer = threading.Timer(interval, lambda: self._poll_for_stability(file_path, event_number, interval, last_mtime))
+                self.polling_tasks[file_path]['timer'] = new_timer
+                new_timer.start()
+            else:
+                # 若尚未達穩定次數，或剛檢測到變動，繼續等待；若已穩定且無變更，結束輪詢
+                if st and st.get('stable', 0) < getattr(settings, 'POLLING_STABLE_CHECKS', 3):
+                    new_timer = threading.Timer(interval, lambda: self._poll_for_stability(file_path, event_number, interval, last_mtime))
+                    self.polling_tasks[file_path]['timer'] = new_timer
+                    new_timer.start()
+                elif changed:
+                    new_timer = threading.Timer(interval, lambda: self._poll_for_stability(file_path, event_number, interval, last_mtime))
+                    self.polling_tasks[file_path]['timer'] = new_timer
+                    new_timer.start()
+                else:
+                    print(f"    [輪詢結束] {os.path.basename(file_path)} 檔案已穩定。")
+                    self.polling_tasks.pop(file_path, None)
+                    self.state.pop(file_path, None)
+
         """
         執行輪詢檢查，如果檔案變更則延長輪詢，否則結束
         """
@@ -114,6 +242,24 @@ class ExcelFileEventHandler(FileSystemEventHandler):
         self.event_counter = 0
         
     def _is_cache_ignored(self, path: str) -> bool:
+        try:
+            if getattr(settings, 'IGNORE_CACHE_FOLDER', False) and getattr(settings, 'CACHE_FOLDER', None):
+                p = os.path.abspath(path)
+                c = os.path.abspath(settings.CACHE_FOLDER)
+                return os.path.commonpath([p, c]) == c
+        except Exception:
+            pass
+        return False
+
+    def _is_log_ignored(self, path: str) -> bool:
+        try:
+            if getattr(settings, 'IGNORE_LOG_FOLDER', False) and getattr(settings, 'LOG_FOLDER', None):
+                p = os.path.abspath(path)
+                l = os.path.abspath(settings.LOG_FOLDER)
+                return os.path.commonpath([p, l]) == l
+        except Exception:
+            pass
+        return False
         try:
             if getattr(settings, 'IGNORE_CACHE_FOLDER', False) and getattr(settings, 'CACHE_FOLDER', None):
                 p = os.path.abspath(path)
@@ -192,8 +338,8 @@ class ExcelFileEventHandler(FileSystemEventHandler):
             
         file_path = event.src_path
         
-        # 忽略 cache 目錄下的所有事件
-        if self._is_cache_ignored(file_path):
+        # 忽略 cache 與 log 目錄下的所有事件
+        if self._is_cache_ignored(file_path) or self._is_log_ignored(file_path):
             return
         
         # 檢查是否為支援的 Excel 檔案

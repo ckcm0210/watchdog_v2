@@ -254,6 +254,8 @@ def create_baseline_for_files_robust(xlsx_files, skip_force_baseline=True):
                 else:
                     curr_author = get_excel_last_author(file_path)
                     baseline_data = {
+                        "source_mtime": os.path.getmtime(file_path),
+                        "source_size": os.path.getsize(file_path),
                         "last_author": curr_author, 
                         "content_hash": curr_hash, 
                         "cells": cell_data

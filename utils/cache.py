@@ -75,6 +75,34 @@ def _ops_log_copy_failure(network_path: str, error: Exception, attempts: int, st
     except Exception:
         pass
 
+def _ops_log_copy_success(network_path: str, duration: float, attempts: int, engine: str, chunk_mb: int):
+    try:
+        base_dir = os.path.join(settings.LOG_FOLDER, 'ops_log')
+        os.makedirs(base_dir, exist_ok=True)
+        fname = f"copy_success_{datetime.now():%Y%m%d}.csv"
+        fpath = os.path.join(base_dir, fname)
+        new_file = not os.path.exists(fpath)
+        with open(fpath, 'a', encoding='utf-8', newline='') as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(['Timestamp','Path','SizeMB','DurationSec','Attempts','Engine','ChunkMB','StabilityChecks','StabilityInterval','StabilityMaxWait','STRICT_NO_ORIGINAL_READ'])
+            size_mb = os.path.getsize(network_path)/(1024*1024) if os.path.exists(network_path) else ''
+            w.writerow([
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                network_path,
+                f"{(size_mb or 0):.2f}" if size_mb != '' else '',
+                f"{duration:.2f}",
+                attempts,
+                engine,
+                int(chunk_mb),
+                int(getattr(settings, 'COPY_STABILITY_CHECKS', 0)),
+                float(getattr(settings, 'COPY_STABILITY_INTERVAL_SEC', 0.0)),
+                float(getattr(settings, 'COPY_STABILITY_MAX_WAIT_SEC', 0.0)),
+                bool(getattr(settings, 'STRICT_NO_ORIGINAL_READ', False)),
+            ])
+    except Exception:
+        pass
+
 
 def _wait_for_stable_mtime(path: str, checks: int, interval: float, max_wait: float) -> bool:
     try:
@@ -104,6 +132,35 @@ def _wait_for_stable_mtime(path: str, checks: int, interval: float, max_wait: fl
             time.sleep(max(0.0, interval))
     except Exception:
         return False
+
+
+def _run_subprocess_copy(src: str, dst: str, engine: str = 'robocopy'):
+    """Run copy via subprocess engines (robocopy or powershell). dst is full file path."""
+    import subprocess, shlex
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if engine == 'robocopy':
+        # robocopy 需要目標目錄 + 檔名分開處理
+        src_dir = os.path.dirname(src)
+        src_name = os.path.basename(src)
+        dst_dir = os.path.dirname(dst)
+        # /COPY:DAT 保留日期/屬性/時間；/NJH /NJS /NFL /NDL /NP 降噪；/R:2 /W:1 重試策略
+        cmd = [
+            'robocopy', src_dir, dst_dir, src_name,
+            '/COPY:DAT', '/R:2', '/W:1', '/NJH', '/NJS', '/NFL', '/NDL', '/NP'
+        ]
+        # robocopy 返回碼 0-7 視為成功
+        rc = subprocess.call(cmd, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        if rc > 7:
+            raise OSError(f"robocopy rc={rc}")
+    elif engine == 'powershell':
+        # 使用 PowerShell Copy-Item
+        ps_cmd = f"Copy-Item -LiteralPath '{src}' -Destination '{dst}' -Force"
+        cmd = ['powershell', '-NoProfile', '-Command', ps_cmd]
+        rc = subprocess.call(cmd, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        if rc != 0:
+            raise OSError(f"powershell Copy-Item rc={rc}")
+    else:
+        raise ValueError(f"Unknown subprocess copy engine: {engine}")
 
 
 def copy_to_cache(network_path, silent=False):
@@ -166,14 +223,32 @@ def copy_to_cache(network_path, silent=False):
 
             copy_start = time.time()
             try:
-                if chunk_mb > 0:
-                    _chunked_copy(network_path, cache_file, chunk_mb=chunk_mb)
+                # 子程序複製策略：.xlsm 或設定指定時優先
+                use_sub = False
+                sub_engine = getattr(settings, 'COPY_ENGINE', 'python')
+                prefer_xlsm = bool(getattr(settings, 'PREFER_SUBPROCESS_FOR_XLSM', False))
+                if sub_engine in ('robocopy', 'powershell'):
+                    use_sub = True
+                elif prefer_xlsm and str(network_path).lower().endswith('.xlsm'):
+                    sub_engine = getattr(settings, 'SUBPROCESS_ENGINE_FOR_XLSM', 'robocopy')
+                    use_sub = True
+
+                if use_sub:
+                    _run_subprocess_copy(network_path, cache_file, engine=sub_engine)
                 else:
-                    shutil.copy2(network_path, cache_file)
+                    if chunk_mb > 0:
+                        _chunked_copy(network_path, cache_file, chunk_mb=chunk_mb)
+                    else:
+                        shutil.copy2(network_path, cache_file)
                 # 短暫等待，給檔案系統穩定
                 time.sleep(getattr(settings, 'COPY_POST_SLEEP_SEC', 0.2))
+                duration = time.time() - copy_start
                 if not silent:
-                    print(f"      複製完成，耗時 {time.time() - copy_start:.1f} 秒（第 {attempt}/{retry} 次嘗試）")
+                    print(f"      複製完成，耗時 {duration:.1f} 秒（第 {attempt}/{retry} 次嘗試）")
+                try:
+                    _ops_log_copy_success(network_path, duration, attempt, engine='python', chunk_mb=chunk_mb)
+                except Exception:
+                    pass
                 return cache_file
             except (PermissionError, OSError) as e:
                 last_err = e
