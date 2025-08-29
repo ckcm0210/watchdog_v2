@@ -1,0 +1,148 @@
+# 複製策略與防呆指引（Excel .xlsx/.xlsm）
+
+本文檔說明 Watchdog 在複製 Excel 檔案到本地快取時，如何兼顧速度與穩定，並提供建議設定值與指令樣例。
+
+## 目標
+- 降低「Bad magic number for file header / File is not a zip file」等壞 ZIP 的機率
+- 在保存/同步尚未完全穩定時避免過早觸碰原檔
+- 在 Windows/網絡磁碟下取得更穩定的複製行為
+
+---
+
+## 一、複製前穩定檢查（必做）
+
+在開始複製前，對來源檔做穩定性判斷，而不是只看 mtime 一次性變化。
+
+建議規則
+- 同時觀察檔案的 mtime 和 size
+- 連續 N 次（建議 3–5 次）完全一致才判定穩定
+- 每次檢查間隔 1.0–1.5 秒
+- 設定上限等待時間（例如 12 秒），超時視為不穩定，延後重試
+
+對應設定（config/settings.py）
+- COPY_STABILITY_CHECKS = 5
+- COPY_STABILITY_INTERVAL_SEC = 1.0（可調 1.2）
+- COPY_STABILITY_MAX_WAIT_SEC = 12.0
+
+實作備註
+- 若檔案位於 OneDrive/SharePoint/SMB 網路路徑，mtime 有機會先更新，但實際內容仍在 flush/同步中；穩定窗口可以有效避開這種情況
+- 偵測到暫存鎖檔（~$ 開頭）時應延後觸碰（SKIP_WHEN_TEMP_LOCK_PRESENT=True）
+
+---
+
+## 二、複製引擎的選擇
+
+設定鍵
+- COPY_ENGINE = 'python' | 'powershell' | 'robocopy'
+- PREFER_SUBPROCESS_FOR_XLSM = True
+- SUBPROCESS_ENGINE_FOR_XLSM = 'robocopy' | 'powershell'
+
+建議
+- 單一大檔（尤其 .xlsm）常見更穩：robocopy 或 PowerShell（子程序）優於 Python 直開檔
+- 快取資料夾放在 SSD，並盡量從防毒即時掃描中排除
+
+---
+
+## 三、robocopy 使用指引（Windows）
+
+程式內部呼叫範式
+- 必須把「來源資料夾」「目的資料夾」「檔名」分開傳給 robocopy：
+  - robocopy "<SRC_DIR>" "<DST_DIR>" "<FILENAME>" [FLAGS...]
+
+建議旗標
+- 穩定與降噪（現有預設）
+  - /COPY:DAT /R:2 /W:1 /NJH /NJS /NFL /NDL /NP
+- 可選提速
+  - /J：非緩衝 I/O（單一大檔常見提速）
+  - /MT:8（多執行緒；對多檔案較有用，單檔效果有限）
+- 可選穩定
+  - /Z：斷點續傳（不穩網路值得開，但會稍慢）
+
+返回碼
+- 0–7 視為成功，>7 為失敗（本專案亦如此處理）
+
+樣例
+```bat
+robocopy "X:\Team\Reports" "C:\cache" "MyBook.xlsx" /COPY:DAT /R:2 /W:1 /NJH /NJS /NFL /NDL /NP /J
+```
+
+---
+
+## 四、PowerShell Copy-Item 使用指引
+
+樣例
+```powershell
+Copy-Item -LiteralPath "\\server\share\MyBook.xlsx" -Destination "C:\cache\MyBook.xlsx" -Force
+```
+
+備註
+- 簡單直覺；在某些環境比 robocopy 更少 retry
+- 請務必搭配「複製後 ZIP 驗證」（見下一節）
+
+---
+
+## 五、複製後 ZIP 結構驗證（強烈建議）
+
+目的
+- 立即檢查複製結果是否為有效的 Excel ZIP 結構，避免壞快取流入後續流程
+
+驗證方式
+- 嘗試以 Zip 解讀 xl/workbook.xml 是否存在
+- 失敗則刪除快取副本，短暫等待後重試複製
+
+建議重試策略
+- 次數：3–5 次
+- 間隔：1–2 秒
+- 仍失敗：視為當前不穩定，跳過本輪
+
+Python 驗證示例（概念）
+```python
+import zipfile, os, time
+def is_valid_xlsx_zip(path: str) -> bool:
+    try:
+        with zipfile.ZipFile(path, "r") as z:
+            z.getinfo("xl/workbook.xml")
+        return True
+    except Exception:
+        return False
+
+# 複製完成後
+for attempt in range(1, 6):
+    if is_valid_xlsx_zip(cache_file):
+        break
+    try: os.remove(cache_file)
+    except: pass
+    time.sleep(1.0)  # backoff
+    # 再次嘗試複製...
+```
+
+PowerShell 驗證示例（概念）
+```powershell
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+try {
+  $zip = [System.IO.Compression.ZipFile]::OpenRead("C:\cache\MyBook.xlsx")
+  $entry = $zip.Entries | Where-Object { $_.FullName -eq "xl/workbook.xml" }
+  $ok = $null -ne $entry
+  $zip.Dispose()
+} catch {
+  $ok = $false
+}
+```
+
+---
+
+## 六、safe_load_workbook 的重試
+
+為應對偶發的 BadZipFile / InvalidFileException，可在載入 Excel 時加入短暫重試：
+- 對 PermissionError、BadZipFile、InvalidFileException 做 3–5 次重試，每次延遲 0.5–1.0 秒
+- 只要配合前述「複製後 ZIP 驗證」，重試次數通常很少觸發
+
+---
+
+## 七、實務最佳化清單
+
+- 快取資料夾 CACHE_FOLDER 放在本機 SSD，並從防毒即時掃描中排除
+- 避免把 CACHE_FOLDER 放入被 Watchdog 監控的根路徑（避免自觸發）
+- 監控時忽略臨時/鎖檔，例如 ~$. 開頭、.tmp、.part
+- 嚴格模式（STRICT_NO_ORIGINAL_READ=True）：複製失敗就跳過，永不直讀原檔
+- 每檔案冷靜期：成功比較後對該檔案強制 15–30 秒冷靜期，減少在保存尾段反覆觸發
