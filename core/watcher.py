@@ -19,14 +19,6 @@ class ActivePollingHandler:
         # { file_path: {"last_mtime":float, "last_size":int, "stable":int, "cooldown_until":float} }
         self.state = {}
 
-    """
-    主動輪詢處理器，採用新的智慧輪詢邏輯
-    """
-    def __init__(self):
-        self.polling_tasks = {}
-        self.lock = threading.Lock()
-        self.stop_event = threading.Event()
-
     def start_polling(self, file_path, event_number):
         """
         根據檔案大小決定輪詢策略（用 mtime/size 穩定檢查，不再用與 baseline 的差異判斷）
@@ -52,26 +44,6 @@ class ActivePollingHandler:
             last_size = -1
         with self.lock:
             self.state[file_path] = {"last_mtime": last_mtime, "last_size": last_size, "stable": 0, "cooldown_until": 0.0}
-        self._start_adaptive_polling(file_path, event_number, interval, last_mtime)
-
-        """
-        根據檔案大小決定輪詢策略（用 mtime 穩定檢查，不再用與 baseline 的差異判斷）
-        """
-        try:
-            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-        except (FileNotFoundError, PermissionError, OSError) as e:
-            logging.warning(f"獲取檔案大小失敗: {file_path}, 錯誤: {e}")
-            file_size_mb = 0
-
-        interval = settings.DENSE_POLLING_INTERVAL_SEC if file_size_mb < settings.POLLING_SIZE_THRESHOLD_MB else settings.SPARSE_POLLING_INTERVAL_SEC
-        polling_type = "密集" if file_size_mb < settings.POLLING_SIZE_THRESHOLD_MB else "稀疏"
-        
-        print(f"[輪詢] 檔案: {os.path.basename(file_path)} ({polling_type}輪詢，每 {interval}s 檢查一次)")
-        # 初始化 last_mtime
-        try:
-            last_mtime = os.path.getmtime(file_path)
-        except Exception:
-            last_mtime = 0
         self._start_adaptive_polling(file_path, event_number, interval, last_mtime)
 
     def _start_adaptive_polling(self, file_path, event_number, interval, last_mtime):
@@ -182,46 +154,6 @@ class ActivePollingHandler:
                     self.polling_tasks.pop(file_path, None)
                     self.state.pop(file_path, None)
 
-        """
-        執行輪詢檢查，如果檔案變更則延長輪詢，否則結束
-        """
-        if self.stop_event.is_set():
-            return
-
-        print(f"    [輪詢檢查] 正在檢查 {os.path.basename(file_path)} 的變更...")
-
-        # 以 mtime 穩定判斷：如果 mtime 沒再變，視為穩定
-        try:
-            current_mtime = os.path.getmtime(file_path)
-        except Exception:
-            current_mtime = last_mtime
-
-        has_changes = False
-        if current_mtime != last_mtime:
-            # 有新變更，更新 last_mtime 並做一次比較
-            last_mtime = current_mtime
-            from core.comparison import compare_excel_changes, set_current_event_number
-            set_current_event_number(event_number)
-            # 在輪詢期間做可見比較；配合「比較後即時更新基準線」，可避免重覆打印相同變更
-            has_changes = compare_excel_changes(file_path, silent=False, event_number=event_number, is_polling=True)
-
-        with self.lock:
-            if file_path not in self.polling_tasks:
-                return
-
-            if has_changes:
-                print(f"    [輪詢] 檔案仍在變更，延長等待時間，{interval} 秒後再次檢查。")
-                
-                def task_wrapper():
-                    self._poll_for_stability(file_path, event_number, interval, last_mtime)
-                
-                new_timer = threading.Timer(interval, task_wrapper)
-                self.polling_tasks[file_path]['timer'] = new_timer
-                new_timer.start()
-            else:
-                print(f"    [輪詢結束] {os.path.basename(file_path)} 檔案已穩定。")
-                self.polling_tasks.pop(file_path, None)
-
     def stop(self):
         """
         停止所有輪詢任務
@@ -257,14 +189,6 @@ class ExcelFileEventHandler(FileSystemEventHandler):
                 p = os.path.abspath(path)
                 l = os.path.abspath(settings.LOG_FOLDER)
                 return os.path.commonpath([p, l]) == l
-        except Exception:
-            pass
-        return False
-        try:
-            if getattr(settings, 'IGNORE_CACHE_FOLDER', False) and getattr(settings, 'CACHE_FOLDER', None):
-                p = os.path.abspath(path)
-                c = os.path.abspath(settings.CACHE_FOLDER)
-                return os.path.commonpath([p, c]) == c
         except Exception:
             pass
         return False

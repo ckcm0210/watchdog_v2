@@ -372,11 +372,19 @@ def log_meaningful_changes_to_csv(file_path, worksheet_name, changes, current_au
         pass
 
     try:
-        os.makedirs(os.path.dirname(settings.CSV_LOG_FILE), exist_ok=True)
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        file_exists = os.path.exists(settings.CSV_LOG_FILE)
+        # Check if CSV_LOG_FILE is a directory and handle it defensively
+        csv_log_path = settings.CSV_LOG_FILE
+        if os.path.exists(csv_log_path) and os.path.isdir(csv_log_path):
+            # Fall back to a default filename in LOG_FOLDER
+            fallback_filename = f"excel_change_log_{datetime.now():%Y%m%d}.csv.gz"
+            csv_log_path = os.path.join(settings.LOG_FOLDER, fallback_filename)
+            logging.warning(f"CSV_LOG_FILE points to a directory, using fallback: {csv_log_path}")
         
-        with gzip.open(settings.CSV_LOG_FILE, 'at', encoding='utf-8', newline='') as f:
+        os.makedirs(os.path.dirname(csv_log_path), exist_ok=True)
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        file_exists = os.path.exists(csv_log_path)
+        
+        with gzip.open(csv_log_path, 'at', encoding='utf-8', newline='') as f:
             writer = csv.writer(f)
             
             if not file_exists:
