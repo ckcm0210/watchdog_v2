@@ -26,6 +26,7 @@ class ActivePollingHandler:
         self.polling_tasks = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
+        self.state = {}
 
     def start_polling(self, file_path, event_number):
         """
@@ -420,3 +421,4 @@ class ExcelFileEventHandler(FileSystemEventHandler):
 
 # 創建全局輪詢處理器實例
 active_polling_handler = ActivePollingHandler()
+
